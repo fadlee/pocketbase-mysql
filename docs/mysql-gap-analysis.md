@@ -2,7 +2,7 @@
 
 Baseline: PocketBase v0.38.0.
 
-This document tracks the first SQLite-specific areas that must be addressed before a MySQL backend can work. It intentionally records gaps only; runtime behavior remains unchanged.
+This document tracks the first SQLite-specific areas that must be addressed before a MySQL backend can work. See `docs/mysql-upstream-workflow.md` for the patch-stack, upstream update, and runtime QA workflow used to keep this fork rebaseable.
 
 ## Baseline Verification
 
