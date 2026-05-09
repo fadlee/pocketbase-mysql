@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"database/sql/driver"
+	"os"
 	"regexp"
 	"strings"
 
@@ -53,6 +54,16 @@ const (
 )
 
 // Common field errors.
+
+func isMySQLDataDB(app App) bool {
+	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+		return true
+	}
+
+	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+	return ok && db.DriverName() == "mysql"
+}
+
 var (
 	ErrUnknownField          = validation.NewError("validation_unknown_field", "Unknown or invalid field.")
 	ErrInvalidFieldValue     = validation.NewError("validation_invalid_field_value", "Invalid field value.")
