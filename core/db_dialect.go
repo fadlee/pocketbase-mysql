@@ -22,3 +22,11 @@ func IsMySQLDataDB(app App) bool {
 	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
 	return ok && strings.EqualFold(db.DriverName(), "mysql")
 }
+
+func jsonArrayColumnType(app App) string {
+	if isMySQLDataDB(app) {
+		return "JSON NOT NULL"
+	}
+
+	return "JSON DEFAULT '[]' NOT NULL"
+}

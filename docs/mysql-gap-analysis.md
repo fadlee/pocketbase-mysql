@@ -377,3 +377,35 @@ GET /api/collections/qa_introspection/records?filter=title~"intro" -> 200
 SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\\'
 {"totalItems":1,"totalPages":1}
 ```
+
+## Runtime QA Schema Update and Select Fields Result
+
+Adding a new field to an existing MySQL-backed collection exposed a schema sync blocker. The SQLite path adds new/renamed fields with a temporary column name and then renames the column to avoid name collisions. On MySQL, the first `ALTER TABLE ... ADD` completed but the request stayed open before the temporary-column rename:
+
+```text
+UPDATE `_collections` SET `fields`='[...] status ...' WHERE `id`='pbc_2775252010'
+ALTER TABLE `qa_schema` ADD `statusA9Vpo` VARCHAR(255) DEFAULT '' NOT NULL
+```
+
+For MySQL, new fields are now added directly with their final column name. This avoids the unsafe add-then-rename path for the first schema update case while keeping the SQLite collision-avoidance behavior unchanged.
+
+When updating a collection that has indexes, MySQL also needs dialect-specific index drops. SQLite accepts `DROP INDEX IF EXISTS indexName`; MySQL requires `DROP INDEX indexName ON tableName`. The schema sync path now uses the MySQL form for record collection indexes.
+
+Multiple select fields exposed another MySQL DDL blocker:
+
+```text
+Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'tags' can't have a default value.
+```
+
+MySQL now uses `JSON NOT NULL` for JSON-array-backed fields, while SQLite keeps `JSON DEFAULT '[]' NOT NULL`. The same helper is used for multiple select, relation, and file fields.
+
+Manual QA with a fresh MySQL 8.4 container now passes:
+
+```text
+PATCH /api/collections/{id} add single select field -> 200
+POST /api/collections/qa_runtime/records with status -> 200
+GET /api/collections/qa_runtime/records?filter=status="draft" -> 200
+POST /api/collections qa_multi_select with tags maxSelect=3 -> 200
+POST /api/collections/qa_multi_select/records with tags ["alpha","beta"] -> 200
+GET /api/collections/qa_multi_select/records?filter=tags~"alpha" -> 200
+```
