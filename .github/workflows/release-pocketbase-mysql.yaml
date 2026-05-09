@@ -1,0 +1,64 @@
+name: release-pocketbase-mysql
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-release:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary_suffix: ''
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            binary_suffix: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            binary_suffix: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary_suffix: ''
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary_suffix: '.exe'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+
+      - name: Build pocketbase-mysql
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
+
+      - name: Package release asset
+        shell: bash
+        run: |
+          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_suffix }}"
+          mv "pocketbase-mysql${{ matrix.binary_suffix }}" "$asset_name"
+          echo "ASSET_NAME=$asset_name" >> "$GITHUB_ENV"
+
+      - name: Upload release asset
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_NAME }}
