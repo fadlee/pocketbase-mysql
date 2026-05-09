@@ -96,6 +96,38 @@ curl -sS -f "$base_url/api/collections/qa_runtime/records?sort=title" \
 curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=title~%22runtime%22" \
 	> "$tmp_dir/filter_records.json"
 
+collection_id="$(jq -r '.id' "$tmp_dir/create_collection.json")"
+jq '.fields += [{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}] | {fields:.fields}' \
+	"$tmp_dir/create_collection.json" > "$tmp_dir/add_select_payload.json"
+
+curl -sS -f -X PATCH "$base_url/api/collections/${collection_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data @"$tmp_dir/add_select_payload.json" \
+	> "$tmp_dir/update_collection_add_select.json"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_runtime/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"title":"schema updated","published":false,"status":"draft"}' \
+	> "$tmp_dir/create_record_after_schema_update.json"
+
+curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=status=%22draft%22" \
+	> "$tmp_dir/filter_select_records.json"
+
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_multi_select","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"tags","type":"select","required":false,"values":["alpha","beta","gamma"],"maxSelect":3}]}' \
+	> "$tmp_dir/create_multi_select_collection.json"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_multi_select/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"title":"multi select","tags":["alpha","beta"]}' \
+	> "$tmp_dir/create_multi_select_record.json"
+
+curl -sS -f "$base_url/api/collections/qa_multi_select/records?filter=tags~%22alpha%22" \
+	> "$tmp_dir/filter_multi_select_records.json"
+
 if grep -q "ERROR" "$tmp_dir/pb.log"; then
 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
 	grep "ERROR" "$tmp_dir/pb.log" >&2
