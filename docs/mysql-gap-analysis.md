@@ -114,3 +114,30 @@ Start Milestone 2 with the smallest PoC:
 4. Boot with `PB_DATABASE_DRIVER=mysql` and record the first real failure after connection.
 
 Do not implement broad dialect abstraction until the PoC confirms the first concrete startup blockers.
+
+## Milestone 2 PoC Result
+
+Minimal MySQL connection routing was added behind environment variables:
+
+- `PB_DATABASE_DRIVER=mysql`
+- `PB_DATABASE_DSN=<mysql dsn>`
+
+For this PoC, only `data.db` is routed to MySQL. `auxiliary.db` remains on the default SQLite connection because `DBConnectFunc` receives only the target path and the blueprint recommends keeping auxiliary SQLite during the first boot experiment.
+
+Manual QA results:
+
+- Missing DSN path works: running with `PB_DATABASE_DRIVER=mysql` and no `PB_DATABASE_DSN` exits with `PB_DATABASE_DSN is required when PB_DATABASE_DRIVER=mysql`.
+- MySQL 8.4 container connection works: PocketBase reaches migration execution and emits MySQL SQL.
+- First startup blocker after connection:
+
+```text
+CREATE TABLE IF NOT EXISTS `_migrations` (file VARCHAR(255) PRIMARY KEY NOT NULL, applied INTEGER NOT NULL)
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (1778344523546328, '1640988000_aux_init.go')
+failed to save applied migration info for 1640988000_aux_init.go: Error 1264 (22003): Out of range value for column 'applied' at row 1
+```
+
+Interpretation:
+
+- The driver/DSN path is not the blocker.
+- The next blocker is schema type generation for system migration metadata: SQLite `INTEGER` accepted the microtimestamp, but MySQL `INTEGER` is too small.
+- The next implementation target should be dialect-aware system table column types, starting with migration metadata before broader collection schema work.

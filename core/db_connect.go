@@ -3,11 +3,31 @@
 package core
 
 import (
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+
+	_ "github.com/go-sql-driver/mysql"
 	"github.com/pocketbase/dbx"
 	_ "modernc.org/sqlite"
 )
 
+const (
+	envDatabaseDriver = "PB_DATABASE_DRIVER"
+	envDatabaseDSN    = "PB_DATABASE_DSN"
+)
+
 func DefaultDBConnect(dbPath string) (*dbx.DB, error) {
+	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") && filepath.Base(dbPath) == "data.db" {
+		dsn := os.Getenv(envDatabaseDSN)
+		if dsn == "" {
+			return nil, fmt.Errorf("%s is required when %s=mysql", envDatabaseDSN, envDatabaseDriver)
+		}
+
+		return dbx.Open("mysql", dsn)
+	}
+
 	// Note: the busy_timeout pragma must be first because
 	// the connection needs to be set to block on busy before WAL mode
 	// is set in case it hasn't been already set by another connection.
