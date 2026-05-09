@@ -562,14 +562,30 @@ func (cv *collectionValidator) checkIndexes(value any) error {
 
 		// ensure that the index name is not used in another collection
 		var usedTblName string
-		_ = cv.app.ConcurrentDB().Select("tbl_name").
-			From("sqlite_master").
-			AndWhere(dbx.HashExp{"type": "index"}).
-			AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:oldName})", dbx.Params{"oldName": cv.original.Name})).
-			AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:newName})", dbx.Params{"newName": cv.new.Name})).
-			AndWhere(dbx.NewExp("LOWER([[name]])=LOWER({:indexName})", dbx.Params{"indexName": parsed.IndexName})).
-			Limit(1).
-			Row(&usedTblName)
+		if isMySQLDataDB(cv.app) {
+			_ = cv.app.ConcurrentDB().NewQuery(`
+				SELECT TABLE_NAME
+				FROM information_schema.STATISTICS
+				WHERE TABLE_SCHEMA = DATABASE()
+					AND LOWER(TABLE_NAME) != LOWER({:oldName})
+					AND LOWER(TABLE_NAME) != LOWER({:newName})
+					AND LOWER(INDEX_NAME) = LOWER({:indexName})
+				LIMIT 1
+			`).Bind(dbx.Params{
+				"oldName":   cv.original.Name,
+				"newName":   cv.new.Name,
+				"indexName": parsed.IndexName,
+			}).Row(&usedTblName)
+		} else {
+			_ = cv.app.ConcurrentDB().Select("tbl_name").
+				From("sqlite_master").
+				AndWhere(dbx.HashExp{"type": "index"}).
+				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:oldName})", dbx.Params{"oldName": cv.original.Name})).
+				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:newName})", dbx.Params{"newName": cv.new.Name})).
+				AndWhere(dbx.NewExp("LOWER([[name]])=LOWER({:indexName})", dbx.Params{"indexName": parsed.IndexName})).
+				Limit(1).
+				Row(&usedTblName)
+		}
 		if usedTblName != "" {
 			return validation.Errors{
 				strconv.Itoa(i): validation.NewError(
