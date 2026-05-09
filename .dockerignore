@@ -1,0 +1,12 @@
+.git
+.github
+.sisyphus
+pb_data
+patches
+ui/node_modules
+ui/dist
+node_modules
+coverage.out
+pocketbase-mysql
+Dockerfile*
+docker-compose*.yml
