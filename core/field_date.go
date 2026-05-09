@@ -107,6 +107,10 @@ func (f *DateField) SetHidden(hidden bool) {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *DateField) ColumnType(app App) string {
+	if isMySQLDataDB(app) {
+		return "VARCHAR(255) DEFAULT '' NOT NULL"
+	}
+
 	return "TEXT DEFAULT '' NOT NULL"
 }
 

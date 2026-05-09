@@ -209,3 +209,33 @@ Interpretation:
 - The `_mfas` system record table can now be created in MySQL.
 - The next blocker is `PasswordField.ColumnType`, which still emits `TEXT DEFAULT '' NOT NULL`.
 - Similar text-backed fields such as email, URL, editor, file/select/relation variants will need the same dialect-aware audit.
+
+## Milestone 2 Text-Backed Field DDL Result
+
+Additional text-backed field types now use MySQL-safe column definitions while preserving SQLite defaults.
+
+Covered field types:
+
+- `PasswordField`
+- `EmailField`
+- `URLField`
+- `EditorField`
+- `DateField`
+- single-value `FileField`
+- single-value `SelectField`
+- single-value `RelationField`
+
+Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+
+```text
+CREATE TABLE `_superusers` (... `email` VARCHAR(255) DEFAULT '' NOT NULL, ...)
+CREATE UNIQUE INDEX `idx_tokenKey_pbc_3142635823` ON `_superusers` (`tokenKey`)
+CREATE UNIQUE INDEX `idx_email_pbc_3142635823` ON `_superusers` (`email`) WHERE `email` != ''
+failed to apply migration 1640988000_init.go: _superusers error: indexes: (1: Failed to create index idx_email_pbc_3142635823 - Error 1064 (42000): ... near 'WHERE `email` != ''' at line 1..).
+```
+
+Interpretation:
+
+- MySQL can now create the early system tables through `_superusers` table creation.
+- The next blocker is SQLite-style partial index SQL stored in collection index definitions.
+- MySQL needs dialect-aware index generation or index normalization, starting with filtered unique indexes such as `WHERE email != ''`.

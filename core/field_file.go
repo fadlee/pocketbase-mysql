@@ -195,6 +195,10 @@ func (f *FileField) ColumnType(app App) string {
 		return "JSON DEFAULT '[]' NOT NULL"
 	}
 
+	if isMySQLDataDB(app) {
+		return "VARCHAR(255) DEFAULT '' NOT NULL"
+	}
+
 	return "TEXT DEFAULT '' NOT NULL"
 }
 
