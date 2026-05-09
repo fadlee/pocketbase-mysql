@@ -258,3 +258,23 @@ Interpretation:
 - The initial system migration can now complete on MySQL.
 - The next blocker is a historical migration that expects the legacy `_params` table shape with a `key` column.
 - Since this fork starts from a fresh v0.38.0 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
+
+## Milestone 2 Legacy v0.23 Migration Skip Result
+
+The legacy v0.23 migration group now exits early for MySQL. These migrations are upgrade-only paths for older SQLite schemas and are not needed for the fresh MySQL v0.38.0 schema created by `1640988000_init.go`.
+
+Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+
+```text
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1717233556_v0.23_migrate.go')
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1717233557_v0.23_migrate2.go')
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1717233558_v0.23_migrate3.go')
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1717233559_v0.23_migrate4.go')
+failed to apply migration 1763020353_update_default_auth_alert_templates.go: Error 1054 (42S22): Unknown column 'rowid' in 'order clause'; failed query: SELECT {{_collections}}.* FROM `_collections` WHERE `type`={:p0} ORDER BY `rowid` ASC
+```
+
+Interpretation:
+
+- The v0.23 legacy migration assumptions no longer block MySQL boot.
+- The next blocker is SQLite-specific ordering by `rowid` in collection queries.
+- MySQL needs a replacement default collection ordering, likely by a stable explicit column such as `id` or `created`, after checking all `rowid` usage.
