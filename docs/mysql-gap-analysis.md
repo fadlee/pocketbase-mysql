@@ -190,3 +190,22 @@ Interpretation:
 - The PoC now passes the hardcoded `_params` and `_collections` startup SQL.
 - The next blocker is generated collection record table DDL from field `ColumnType` values.
 - MySQL cannot use `TEXT DEFAULT ''`, so text/autodate field column generation needs dialect-aware types before system collections such as `_mfas` can be created.
+
+## Milestone 2 Text and Autodate Field DDL Result
+
+Generated MySQL record table DDL now uses MySQL-safe column types for text and autodate fields while preserving SQLite defaults.
+
+Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+
+```text
+CREATE TABLE `_mfas` (`collectionRef` VARCHAR(255) DEFAULT '' NOT NULL, `created` VARCHAR(255) DEFAULT '' NOT NULL, `id` VARCHAR(15) PRIMARY KEY NOT NULL, `method` VARCHAR(255) DEFAULT '' NOT NULL, `recordRef` VARCHAR(255) DEFAULT '' NOT NULL, `updated` VARCHAR(255) DEFAULT '' NOT NULL)
+CREATE INDEX `idx_mfas_collectionRef_recordRef` ON `_mfas` (`collectionRef`, `recordRef`)
+CREATE TABLE `_otps` (... `password` TEXT DEFAULT '' NOT NULL, ...)
+failed to apply migration 1640988000_init.go: _otps error: Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'password' can't have a default value
+```
+
+Interpretation:
+
+- The `_mfas` system record table can now be created in MySQL.
+- The next blocker is `PasswordField.ColumnType`, which still emits `TEXT DEFAULT '' NOT NULL`.
+- Similar text-backed fields such as email, URL, editor, file/select/relation variants will need the same dialect-aware audit.
