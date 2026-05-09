@@ -278,3 +278,23 @@ Interpretation:
 - The v0.23 legacy migration assumptions no longer block MySQL boot.
 - The next blocker is SQLite-specific ordering by `rowid` in collection queries.
 - MySQL needs a replacement default collection ordering, likely by a stable explicit column such as `id` or `created`, after checking all `rowid` usage.
+
+## Milestone 2 Collection Ordering Result
+
+Collection listing now uses `ORDER BY id ASC` for MySQL while preserving SQLite's `ORDER BY rowid ASC` behavior.
+
+Manual QA with a fresh MySQL 8.4 container now reaches a running server:
+
+```text
+SELECT `_collections`.* FROM `_collections` WHERE `type`='auth' ORDER BY `id` ASC
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1763020353_update_default_auth_alert_templates.go')
+Server started at http://127.0.0.1:18090
+REST API:  http://127.0.0.1:18090/api/
+Dashboard: http://127.0.0.1:18090/_/
+```
+
+Interpretation:
+
+- The current PoC can boot PocketBase against MySQL and reach the server start state.
+- Remaining warnings still include SQLite-specific maintenance/introspection calls such as `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master` during schema/cache operations.
+- Next work should shift from boot blockers to a focused audit of runtime correctness: introspection helpers, CRUD record creation, auth login, index semantics, and JSON/list fields.
