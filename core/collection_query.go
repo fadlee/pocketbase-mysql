@@ -314,8 +314,17 @@ func normalizeViewQueryId(app App, query string) (string, error) {
 	}
 
 	for _, row := range info {
-		if strings.EqualFold(row.Name, FieldNameId) && strings.EqualFold(row.Type, "TEXT") {
-			return query, nil // no wrapping needed
+		if strings.EqualFold(row.Name, FieldNameId) {
+			if strings.EqualFold(row.Type, "TEXT") {
+				return query, nil // no wrapping needed
+			}
+
+			if isMySQLDataDB(app) {
+				rowType := strings.ToUpper(row.Type)
+				if strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT") {
+					return query, nil // already string-compatible for MySQL ids
+				}
+			}
 		}
 	}
 
@@ -326,15 +335,24 @@ func normalizeViewQueryId(app App, query string) (string, error) {
 	}
 
 	columns := make([]string, 0, len(rawParsed.columns))
+	viewSourceAlias := "__pb_view_source"
 	for _, col := range rawParsed.columns {
 		if col.alias == FieldNameId {
-			columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
+			if isMySQLDataDB(app) {
+				columns = append(columns, fmt.Sprintf("CAST([[%s]] as CHAR(255)) [[%s]]", col.alias, col.alias))
+			} else {
+				columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
+			}
 		} else {
 			columns = append(columns, "[["+col.alias+"]]")
 		}
 	}
 
-	query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
+	if isMySQLDataDB(app) {
+		query = fmt.Sprintf("SELECT %s FROM (%s) [[%s]]", strings.Join(columns, ","), query, viewSourceAlias)
+	} else {
+		query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
+	}
 
 	return query, nil
 }

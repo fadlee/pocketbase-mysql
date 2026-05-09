@@ -51,7 +51,11 @@ func (app *BaseApp) SaveView(dangerousViewName string, dangerousSelectQuery stri
 		//
 		// note: the query is wrapped in a secondary SELECT as a rudimentary
 		// measure to discourage multiple inline sql statements execution
+		viewSourceAlias := "__pb_view_source"
 		viewQuery := fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s)", dangerousViewName, dangerousSelectQuery)
+		if isMySQLDataDB(txApp) {
+			viewQuery = fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s) [[%s]]", dangerousViewName, dangerousSelectQuery, viewSourceAlias)
+		}
 		_, err = txApp.DB().NewQuery(viewQuery).Execute()
 		if err != nil {
 			return err
@@ -160,11 +164,16 @@ func (app *BaseApp) DryRunView(dangerousSelectQuery string, sampleSize int) (*Dr
 	}
 
 	records := []*Record{}
+	viewSourceAlias := "__pb_view_source"
+	fromQuery := "(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName
+	if isMySQLDataDB(app) {
+		fromQuery = "(SELECT * FROM (" + dangerousSelectQuery + ") as " + viewSourceAlias + ") as " + tempName
+	}
 
 	err = app.RecordQuery(tempCollection).
 		// note: the query is wrapped in a secondary SELECT as a rudimentary
 		// measure to discourage multiple inline sql statements execution
-		From("(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName).
+		From(fromQuery).
 		Limit(int64(sampleSize)).
 		All(&records)
 	if err != nil {
