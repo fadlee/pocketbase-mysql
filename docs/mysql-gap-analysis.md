@@ -338,3 +338,22 @@ WARN Failed to run PRAGMA optimize after record table sync
 ```
 
 Remaining runtime compatibility noise is now focused on schema/index introspection queries using `sqlite_schema` and `sqlite_master` during collection creation and validation.
+
+## Runtime QA Introspection Result
+
+The high-traffic data DB metadata helpers now use MySQL `information_schema` when the data DB driver is MySQL:
+
+- table existence checks use `information_schema.TABLES`.
+- table columns and table info use `information_schema.COLUMNS`.
+- table index lookup and collection index-name validation use `information_schema.STATISTICS`.
+
+Manual QA with a fresh MySQL 8.4 container still boots and can create an indexed collection through the REST API:
+
+```text
+POST /api/collections/_superusers/auth-with-password -> 200
+POST /api/collections qa_introspection with idx_qa_introspection_title -> 200
+CREATE TABLE `qa_introspection` (...)
+CREATE INDEX `idx_qa_introspection_title` ON `qa_introspection` (`title`)
+```
+
+The collection creation log now shows `information_schema.TABLES` and `information_schema.STATISTICS` for data DB metadata lookups instead of `sqlite_schema` and `sqlite_master`.
