@@ -90,6 +90,60 @@ CI behavior in this fork:
 - branch/PR pushes run `.github/workflows/build-pocketbase-mysql.yaml` and upload build artifacts to the Actions run
 - tag pushes matching `v*` run `.github/workflows/release-pocketbase-mysql.yaml` and attach binaries to GitHub Releases
 
+## Container Image
+
+This fork uses an app-only container image. It does **not** extend the official MySQL image.
+
+Why:
+
+- PocketBase and MySQL should remain separate services.
+- the app can connect to managed MySQL or any external MySQL deployment.
+- container lifecycle stays simple: one container, one primary process.
+
+Files:
+
+- `Dockerfile` - multi-stage build for `pocketbase-mysql`
+- `.dockerignore` - keeps the build context small
+- `docker-compose.mysql.yml` - example app + MySQL composition
+
+Build locally:
+
+```sh
+docker build -t pocketbase-mysql:local .
+```
+
+Run the image directly:
+
+```sh
+docker run --rm -p 8090:8090 \
+  -e PB_DATABASE_DRIVER=mysql \
+  -e PB_DATABASE_DSN='root:pbpass@tcp(host.docker.internal:3306)/pocketbase?parseTime=true&multiStatements=true' \
+  pocketbase-mysql:local
+```
+
+Run with the example compose stack:
+
+```sh
+docker compose -f docker-compose.mysql.yml up --build
+```
+
+The app container stores PocketBase runtime data in `/pb_data`.
+
+## GHCR Publishing
+
+This fork now publishes an OCI image to GHCR via `.github/workflows/publish-ghcr.yaml`.
+
+Publish behavior:
+
+- push to `mysql/main` -> push `ghcr.io/fadlee/pocketbase-mysql:mysql-main`
+- default branch builds can also carry `latest` when `mysql/main` is the repo default branch
+- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.38.0-mysql.1`
+
+The workflow builds multi-arch images for:
+
+- `linux/amd64`
+- `linux/arm64`
+
 Example release flow:
 
 ```sh

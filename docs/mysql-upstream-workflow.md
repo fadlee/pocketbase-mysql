@@ -103,6 +103,29 @@ Run it with:
 ./pocketbase-mysql serve
 ```
 
+## Container Output
+
+This fork also supports an app-only container image build.
+
+Local image build:
+
+```sh
+docker build -t pocketbase-mysql:local .
+```
+
+Example local stack:
+
+```sh
+docker compose -f docker-compose.mysql.yml up --build
+```
+
+GitHub container publishing:
+
+- `.github/workflows/publish-ghcr.yaml`
+- publishes to `ghcr.io/fadlee/pocketbase-mysql`
+- branch push on `mysql/main` publishes the rolling branch image
+- tag push `v*` publishes versioned image tags
+
 ## Refactor Boundaries
 
 Keep MySQL-specific code behind small seams where possible:
