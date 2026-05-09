@@ -38,7 +38,12 @@ func (app *BaseApp) FindAllCollections(collectionTypes ...string) ([]*Collection
 		q.AndWhere(dbx.In("type", list.ToInterfaceSlice(types)...))
 	}
 
-	err := q.OrderBy("rowid ASC").All(&collections)
+	orderBy := "rowid ASC"
+	if isMySQLDataDB(app) {
+		orderBy = "id ASC"
+	}
+
+	err := q.OrderBy(orderBy).All(&collections)
 	if err != nil {
 		return nil, err
 	}
