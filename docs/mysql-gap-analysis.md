@@ -421,3 +421,37 @@ GET /api/collections/qa_matrix/records?filter=state~"draft" -> 200
 PATCH multi select -> single select -> 200
 GET /api/collections/qa_matrix/records?filter=state="published" -> 200
 ```
+
+## Runtime QA Relation-Many and View Result
+
+Relation-many runtime now passes on MySQL for the covered surface:
+
+```text
+POST /api/collections qa_authors -> 200
+POST /api/collections qa_books with authors relation maxSelect=3 -> 200
+POST /api/collections/qa_books/records with authors [id1,id2] -> 200
+GET /api/collections/qa_authors/records?filter=qa_books_via_authors.title~"Book" -> 200
+GET /api/collections/qa_books/records?filter=authors.name~"Author" -> 200
+GET /api/collections/qa_books/records?expand=authors -> 200
+```
+
+The main MySQL-specific fixes were:
+
+- replacing SQLite `json_each(...)` relation-array joins with MySQL-safe relation comparisons,
+- using `JSON_CONTAINS(..., JSON_QUOTE(id))` for MySQL relation-many joins,
+- keeping binary-safe id comparisons where relation value extraction still participates in SQL predicates.
+
+Simple view collections now also pass on MySQL:
+
+```text
+POST /api/collections qa_books_view type=view viewQuery="SELECT id, title FROM qa_books" -> 200
+GET /api/collections/qa_books_view/records -> 200 (superuser auth)
+GET /api/collections/qa_books_view/records?filter=title~"Book" -> 200
+POST /api/collections/qa_books/records title="Book Two" -> 200
+GET /api/collections/qa_books_view/records?sort=title -> 200 with both Book One and Book Two
+```
+
+The MySQL view fixes required:
+
+- adding aliases to derived-table wrappers used during persistent view creation and temp-view introspection,
+- avoiding repeated MySQL rewrapping when the normalized `id` column is already `CHAR`/`VARCHAR`.

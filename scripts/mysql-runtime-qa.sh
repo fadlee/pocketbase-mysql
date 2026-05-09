@@ -192,6 +192,70 @@ curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
 curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state=%22published%22" \
 	> "$tmp_dir/filter_matrix_single_records.json"
 
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_authors","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"name","type":"text","required":true,"max":255}]}' \
+	> "$tmp_dir/create_authors_collection.json"
+
+authors_collection_id="$(jq -r '.id' "$tmp_dir/create_authors_collection.json")"
+
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_books","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"authors","type":"relation","required":false,"collectionId":"'"${authors_collection_id}"'","maxSelect":3}]}' \
+	> "$tmp_dir/create_books_collection.json"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"Author One"}' \
+	> "$tmp_dir/create_author_one.json"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"Author Two"}' \
+	> "$tmp_dir/create_author_two.json"
+
+author_one_id="$(jq -r '.id' "$tmp_dir/create_author_one.json")"
+author_two_id="$(jq -r '.id' "$tmp_dir/create_author_two.json")"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"title":"Book One","authors":["'"${author_one_id}"'","'"${author_two_id}"'"]}' \
+	> "$tmp_dir/create_book_one.json"
+
+curl -sS -f "$base_url/api/collections/qa_authors/records?filter=qa_books_via_authors.title~%22Book%22" \
+	> "$tmp_dir/filter_back_relation_records.json"
+
+curl -sS -f "$base_url/api/collections/qa_books/records?filter=authors.name~%22Author%22" \
+	> "$tmp_dir/filter_forward_relation_records.json"
+
+curl -sS -f "$base_url/api/collections/qa_books/records?expand=authors" \
+	> "$tmp_dir/expand_relation_records.json"
+
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_books_view","type":"view","viewQuery":"SELECT id, title FROM qa_books"}' \
+	> "$tmp_dir/create_books_view_collection.json"
+
+curl -sS -f "$base_url/api/collections/qa_books_view/records" \
+	-H "Authorization: Bearer ${token}" \
+	> "$tmp_dir/list_books_view_records.json"
+
+curl -sS -f "$base_url/api/collections/qa_books_view/records?filter=title~%22Book%22" \
+	-H "Authorization: Bearer ${token}" \
+	> "$tmp_dir/filter_books_view_records.json"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"title":"Book Two"}' \
+	> "$tmp_dir/create_book_two.json"
+
+curl -sS -f "$base_url/api/collections/qa_books_view/records?sort=title" \
+	-H "Authorization: Bearer ${token}" \
+	> "$tmp_dir/list_books_view_after_update.json"
+
 if grep -q "ERROR" "$tmp_dir/pb.log"; then
 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
 	grep "ERROR" "$tmp_dir/pb.log" >&2
