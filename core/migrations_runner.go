@@ -249,8 +249,9 @@ func (r *MigrationsRunner) initMigrationsTable() error {
 	}
 
 	rawQuery := fmt.Sprintf(
-		"CREATE TABLE IF NOT EXISTS {{%s}} (file VARCHAR(255) PRIMARY KEY NOT NULL, applied INTEGER NOT NULL)",
+		"CREATE TABLE IF NOT EXISTS {{%s}} (file VARCHAR(255) PRIMARY KEY NOT NULL, applied %s NOT NULL)",
 		r.tableName,
+		migrationAppliedColumnType(r.app),
 	)
 
 	_, err := r.app.DB().NewQuery(rawQuery).Execute()
@@ -260,6 +261,14 @@ func (r *MigrationsRunner) initMigrationsTable() error {
 	}
 
 	return err
+}
+
+func migrationAppliedColumnType(app App) string {
+	if db, ok := app.ConcurrentDB().(interface{ DriverName() string }); ok && db.DriverName() == "mysql" {
+		return "BIGINT"
+	}
+
+	return "INTEGER"
 }
 
 func (r *MigrationsRunner) isMigrationApplied(txApp App, file string) bool {
