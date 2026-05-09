@@ -165,3 +165,28 @@ Interpretation:
 - Migration metadata can now be recorded in MySQL.
 - The next blocker is the initial system schema migration, starting with `_params`.
 - MySQL needs dialect-specific replacements for SQLite defaults such as `randomblob(...)` ID generation and `strftime(...)` timestamp defaults.
+
+## Milestone 2 Initial System Schema SQL Result
+
+The initial `_params` and `_collections` schema now uses a MySQL-specific branch while preserving the original SQLite SQL path.
+
+Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+
+```text
+CREATE TABLE `_params` (
+    `id`      VARCHAR(15) PRIMARY KEY NOT NULL,
+    `value`   JSON DEFAULT NULL,
+    `created` VARCHAR(255) DEFAULT "" NOT NULL,
+    `updated` VARCHAR(255) DEFAULT "" NOT NULL
+);
+CREATE TABLE `_collections` (...);
+CREATE INDEX idx__collections_type on `_collections` (`type`)
+CREATE TABLE `_mfas` (`collectionRef` TEXT DEFAULT '' NOT NULL, ...)
+failed to apply migration 1640988000_init.go: _mfas error: Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'collectionRef' can't have a default value
+```
+
+Interpretation:
+
+- The PoC now passes the hardcoded `_params` and `_collections` startup SQL.
+- The next blocker is generated collection record table DDL from field `ColumnType` values.
+- MySQL cannot use `TEXT DEFAULT ''`, so text/autodate field column generation needs dialect-aware types before system collections such as `_mfas` can be created.

@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 
@@ -34,7 +35,7 @@ func init() {
 
 		// -----------------------------------------------------------
 
-		_, execerr := txApp.DB().NewQuery(`
+		collectionsSQL := `
 			CREATE TABLE {{_collections}} (
 				[[id]]         TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
 				[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
@@ -53,9 +54,37 @@ func init() {
 			);
 
 			CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);
-		`).Execute()
+		`
+		if isMySQLDataDB(txApp) {
+			collectionsSQL = `
+				CREATE TABLE {{_collections}} (
+					[[id]]         VARCHAR(15) PRIMARY KEY NOT NULL,
+					[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+					[[type]]       VARCHAR(255) DEFAULT "base" NOT NULL,
+					[[name]]       VARCHAR(255) UNIQUE NOT NULL,
+					[[fields]]     JSON NOT NULL,
+					[[indexes]]    JSON NOT NULL,
+					[[listRule]]   TEXT DEFAULT NULL,
+					[[viewRule]]   TEXT DEFAULT NULL,
+					[[createRule]] TEXT DEFAULT NULL,
+					[[updateRule]] TEXT DEFAULT NULL,
+					[[deleteRule]] TEXT DEFAULT NULL,
+					[[options]]    JSON NOT NULL,
+					[[created]]    VARCHAR(255) DEFAULT "" NOT NULL,
+					[[updated]]    VARCHAR(255) DEFAULT "" NOT NULL
+				);
+			`
+		}
+
+		_, execerr := txApp.DB().NewQuery(collectionsSQL).Execute()
 		if execerr != nil {
 			return fmt.Errorf("_collections exec error: %w", execerr)
+		}
+		if isMySQLDataDB(txApp) {
+			_, execerr = txApp.DB().NewQuery("CREATE INDEX idx__collections_type on {{_collections}} ([[type]])").Execute()
+			if execerr != nil {
+				return fmt.Errorf("_collections type index error: %w", execerr)
+			}
 		}
 
 		if err := createMFAsCollection(txApp); err != nil {
@@ -105,16 +134,37 @@ func init() {
 }
 
 func createParamsTable(txApp core.App) error {
-	_, execErr := txApp.DB().NewQuery(`
+	query := `
 		CREATE TABLE {{_params}} (
 			[[id]]      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
 			[[value]]   JSON DEFAULT NULL,
 			[[created]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
 			[[updated]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
 		);
-	`).Execute()
+	`
+	if isMySQLDataDB(txApp) {
+		query = `
+			CREATE TABLE {{_params}} (
+				[[id]]      VARCHAR(15) PRIMARY KEY NOT NULL,
+				[[value]]   JSON DEFAULT NULL,
+				[[created]] VARCHAR(255) DEFAULT "" NOT NULL,
+				[[updated]] VARCHAR(255) DEFAULT "" NOT NULL
+			);
+		`
+	}
+
+	_, execErr := txApp.DB().NewQuery(query).Execute()
 
 	return execErr
+}
+
+func isMySQLDataDB(app core.App) bool {
+	if os.Getenv("PB_DATABASE_DRIVER") == "mysql" {
+		return true
+	}
+
+	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+	return ok && db.DriverName() == "mysql"
 }
 
 func createMFAsCollection(txApp core.App) error {
