@@ -10,6 +10,95 @@
     <a href="https://pkg.go.dev/github.com/pocketbase/pocketbase" target="_blank" rel="noopener"><img src="https://godoc.org/github.com/pocketbase/pocketbase?status.svg" alt="Go package documentation" /></a>
 </p>
 
+## MySQL Fork Status
+
+This repository is a PocketBase fork that adds a MySQL-backed data DB PoC while keeping the upstream SQLite-first behavior as the default path.
+
+Current baseline:
+
+- upstream source imported from PocketBase `v0.38.0`
+- active development branch: `mysql/main`
+- upstream remote kept as `upstream`
+- GitHub fork repo: `fadlee/pocketbase-mysql`
+
+Important scope notes:
+
+- This is not a drop-in replacement for upstream PocketBase releases yet.
+- The fork currently targets verified MySQL runtime compatibility for the covered features below.
+- Auxiliary/log DB still follows the existing SQLite path during the PoC.
+
+## Branch Strategy
+
+Recommended branch layout for this fork:
+
+- `upstream/master` or upstream tags remain the source baseline.
+- `mysql/main` is the long-lived integration branch for the MySQL fork.
+- short-lived feature/fix branches branch off `mysql/main` and merge back there.
+- do **not** merge this work into local `main`; keep `main` disposable or unused if it does not track the fork history you want to publish.
+
+Recommended update flow:
+
+1. fetch new upstream tags/commits
+2. rebase or replay the MySQL patch stack onto the new upstream baseline
+3. run `go test ./...`
+4. run `scripts/mysql-runtime-qa.sh`
+5. export a fresh patch stack if needed
+
+See `docs/mysql-upstream-workflow.md` for the detailed rebase and patch workflow.
+
+## Parity Snapshot
+
+Compared with upstream PocketBase `v0.38.0`, the MySQL fork currently has the following runtime status:
+
+| Area | Status | Notes |
+|---|---|---|
+| Server boot on MySQL data DB | Working | Fresh MySQL 8.4 container verified |
+| Collections CRUD basics | Working | Create/list/update core flows covered |
+| Record CRUD basics | Working | Create/list/filter basic records covered |
+| Schema update matrix | Working | Rename, delete, single->multi, multi->single verified |
+| Select fields | Working | Single and multiple select verified |
+| Relation-many runtime | Working | Create, filter, expand verified for covered cases |
+| Simple view collections | Working | Create, list, filter, base-record update visibility verified |
+| GitHub binary CI artifacts | Working | Branch/PR workflow uploads artifacts |
+| GitHub release binaries | Working on tagged releases | Triggered by pushing tags matching `v*` |
+| Full upstream feature parity | Not claimed | This fork is still a MySQL compatibility PoC, not full parity |
+
+For the detailed change log and blockers/fixes history, see `docs/mysql-gap-analysis.md`.
+
+## Build and Release
+
+`go build ./...` only checks compilation. To build the runnable fork binary:
+
+```sh
+go build -o pocketbase-mysql ./examples/base
+```
+
+This produces:
+
+```sh
+./pocketbase-mysql
+```
+
+You can run it with:
+
+```sh
+./pocketbase-mysql serve
+```
+
+CI behavior in this fork:
+
+- branch/PR pushes run `.github/workflows/build-pocketbase-mysql.yaml` and upload build artifacts to the Actions run
+- tag pushes matching `v*` run `.github/workflows/release-pocketbase-mysql.yaml` and attach binaries to GitHub Releases
+
+Example release flow:
+
+```sh
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+After the tag push completes, release binaries should appear in the GitHub Releases page for this fork.
+
 [PocketBase](https://pocketbase.io) is an open source Go backend that includes:
 
 - embedded database (_SQLite_) with **realtime subscriptions**
