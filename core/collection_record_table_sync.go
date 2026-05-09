@@ -337,6 +337,9 @@ func createCollectionIndexes(app App, collection *Collection) error {
 
 			// ensure that the index is always for the current collection
 			parsed.TableName = collection.Name
+			if isMySQLDataDB(txApp) {
+				parsed.Where = ""
+			}
 
 			if !parsed.IsValid() {
 				errs[strconv.Itoa(i)] = validation.NewError(
