@@ -239,3 +239,22 @@ Interpretation:
 - MySQL can now create the early system tables through `_superusers` table creation.
 - The next blocker is SQLite-style partial index SQL stored in collection index definitions.
 - MySQL needs dialect-aware index generation or index normalization, starting with filtered unique indexes such as `WHERE email != ''`.
+
+## Milestone 2 Partial Index PoC Result
+
+MySQL index creation now drops parsed `WHERE` predicates during collection index creation. This is a PoC-only compatibility step for SQLite partial indexes.
+
+Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+
+```text
+CREATE UNIQUE INDEX `idx_email_pbc_3142635823` ON `_superusers` (`email`)
+CREATE UNIQUE INDEX `idx_email__pb_users_auth_` ON `users` (`email`)
+INSERT INTO `_migrations` (`applied`, `file`) VALUES (..., '1640988000_init.go')
+failed to apply migration 1717233556_v0.23_migrate.go: failed to fetch old settings: Error 1054 (42S22): Unknown column 'key' in 'where clause'
+```
+
+Interpretation:
+
+- The initial system migration can now complete on MySQL.
+- The next blocker is a historical migration that expects the legacy `_params` table shape with a `key` column.
+- Since this fork starts from a fresh v0.38.0 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
