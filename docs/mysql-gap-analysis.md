@@ -357,3 +357,23 @@ CREATE INDEX `idx_qa_introspection_title` ON `qa_introspection` (`title`)
 ```
 
 The collection creation log now shows `information_schema.TABLES` and `information_schema.STATISTICS` for data DB metadata lookups instead of `sqlite_schema` and `sqlite_master`.
+
+## Runtime QA LIKE Filter Result
+
+Basic text filtering exposed the next runtime blocker:
+
+```text
+GET /api/collections/qa_introspection/records?filter=title~"intro" -> 400
+Error 1064 (42000): ... near ''\' LIMIT 30'
+SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\'
+```
+
+MySQL requires the backslash escape character to be escaped in the generated SQL string literal. The record field resolver now provides a MySQL-specific `LIKE` escape clause while the generic search resolver keeps the existing SQLite clause.
+
+Manual QA after restart now passes:
+
+```text
+GET /api/collections/qa_introspection/records?filter=title~"intro" -> 200
+SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\\'
+{"totalItems":1,"totalPages":1}
+```

@@ -81,6 +81,14 @@ func (r *RecordFieldResolver) SetAllowHiddenFields(allowHiddenFields bool) {
 	r.allowHiddenFields = allowHiddenFields
 }
 
+func (r *RecordFieldResolver) LikeEscapeClause() string {
+	if isMySQLDataDB(r.app) {
+		return " ESCAPE '\\\\'"
+	}
+
+	return " ESCAPE '\\'"
+}
+
 // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
 func NewRecordFieldResolver(
 	app App,
