@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"database/sql/driver"
-	"os"
 	"regexp"
 	"strings"
 
@@ -52,21 +51,6 @@ const (
 	InterceptorActionAfterUpdate      = "afterUpdate"
 	InterceptorActionAfterUpdateError = "afterUpdateError"
 )
-
-// Common field errors.
-
-func isMySQLDataDB(app App) bool {
-	return IsMySQLDataDB(app)
-}
-
-func IsMySQLDataDB(app App) bool {
-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
-		return true
-	}
-
-	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
-	return ok && db.DriverName() == "mysql"
-}
 
 var (
 	ErrUnknownField          = validation.NewError("validation_unknown_field", "Unknown or invalid field.")

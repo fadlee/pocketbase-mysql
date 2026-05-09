@@ -13,11 +13,6 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const (
-	envDatabaseDriver = "PB_DATABASE_DRIVER"
-	envDatabaseDSN    = "PB_DATABASE_DSN"
-)
-
 func DefaultDBConnect(dbPath string) (*dbx.DB, error) {
 	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") && filepath.Base(dbPath) == "data.db" {
 		dsn := os.Getenv(envDatabaseDSN)
