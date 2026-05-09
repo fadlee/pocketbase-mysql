@@ -75,6 +75,34 @@ MYSQL_QA_DATABASE=pocketbase
 
 The script is intentionally a smoke test, not a full compatibility suite. Extend it when a new runtime blocker is fixed so future upstream updates catch regressions.
 
+## Build Output
+
+`go build ./...` is a compile verification step only. It does not produce a single final application binary in the repository root.
+
+To build the runnable fork binary in this repository, use:
+
+```sh
+make build
+```
+
+or directly:
+
+```sh
+go build -o pocketbase-mysql ./examples/base
+```
+
+This produces the executable at:
+
+```sh
+./pocketbase-mysql
+```
+
+Run it with:
+
+```sh
+./pocketbase-mysql serve
+```
+
 ## Refactor Boundaries
 
 Keep MySQL-specific code behind small seams where possible:
