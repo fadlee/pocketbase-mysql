@@ -325,3 +325,16 @@ GET /api/collections/qa_posts/records?sort=title -> 200
 ```
 
 Remaining warnings still include MySQL-incompatible SQLite maintenance/introspection queries during schema sync, especially `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master`. The next runtime QA target should exercise schema changes and index/list/JSON fields to turn those warnings into concrete compatibility fixes.
+
+## Runtime QA PRAGMA Optimize Result
+
+The record-table schema sync path no longer runs SQLite `PRAGMA optimize` for MySQL-backed data DBs. SQLite keeps the existing immediate post-sync optimization and periodic optimization behavior.
+
+Manual QA with a fresh MySQL 8.4 container still passes collection creation, and the server log no longer emits the previous warning:
+
+```text
+WARN Failed to run PRAGMA optimize after record table sync
+└─ Error 1064 (42000): ... near 'PRAGMA optimize'
+```
+
+Remaining runtime compatibility noise is now focused on schema/index introspection queries using `sqlite_schema` and `sqlite_master` during collection creation and validation.

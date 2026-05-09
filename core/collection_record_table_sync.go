@@ -142,11 +142,13 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 		return txErr
 	}
 
-	// run optimize per the SQLite recommendations
-	// (https://www.sqlite.org/pragma.html#pragma_optimize)
-	_, optimizeErr := app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
-	if optimizeErr != nil {
-		app.Logger().Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", optimizeErr.Error()))
+	if !isMySQLDataDB(app) {
+		// run optimize per the SQLite recommendations
+		// (https://www.sqlite.org/pragma.html#pragma_optimize)
+		_, optimizeErr := app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
+		if optimizeErr != nil {
+			app.Logger().Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", optimizeErr.Error()))
+		}
 	}
 
 	return nil
