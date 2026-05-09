@@ -114,6 +114,10 @@ func (f *EditorField) SetHidden(hidden bool) {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *EditorField) ColumnType(app App) string {
+	if isMySQLDataDB(app) {
+		return "LONGTEXT NOT NULL"
+	}
+
 	return "TEXT DEFAULT '' NOT NULL"
 }
 
