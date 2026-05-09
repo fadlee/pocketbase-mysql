@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 
@@ -13,8 +14,6 @@ import (
 	"github.com/pocketbase/pocketbase/tools/store"
 	"github.com/spf13/cast"
 )
-
-const defaultLikeEscapeClause = " ESCAPE '\\'"
 
 // FilterData is a filter expression string following the `fexpr` package grammar.
 //
@@ -173,7 +172,15 @@ func likeEscapeClause(fieldResolver FieldResolver) string {
 		return r.LikeEscapeClause()
 	}
 
-	return defaultLikeEscapeClause
+	return defaultLikeEscapeClause()
+}
+
+func defaultLikeEscapeClause() string {
+	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+		return " ESCAPE '\\\\'"
+	}
+
+	return " ESCAPE '\\'"
 }
 
 func buildResolversExpr(
@@ -661,7 +668,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
 			// doesn't matter whether it is applied on the left or right subquery operand
 			AfterBuild: dbx.Not, // inverse for the not-exist expression
 		},
-		defaultLikeEscapeClause,
+		defaultLikeEscapeClause(),
 	)
 
 	if buildErr != nil {
@@ -720,9 +727,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
 	var buildErr error
 
 	if e.inverse {
-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause)
+		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause())
 	} else {
-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause)
+		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause())
 	}
 
 	if buildErr != nil {
