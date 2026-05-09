@@ -14,6 +14,8 @@ import (
 	"github.com/spf13/cast"
 )
 
+const defaultLikeEscapeClause = " ESCAPE '\\'"
+
 // FilterData is a filter expression string following the `fexpr` package grammar.
 //
 // The filter string can also contain dbx placeholder parameters (eg. "title = {:name}"),
@@ -163,13 +165,22 @@ func resolveTokenizedExpr(expr fexpr.Expr, fieldResolver FieldResolver) (dbx.Exp
 		return nil, fmt.Errorf("invalid right operand %q - %v", expr.Right.Literal, rErr)
 	}
 
-	return buildResolversExpr(lResult, expr.Op, rResult)
+	return buildResolversExpr(lResult, expr.Op, rResult, likeEscapeClause(fieldResolver))
+}
+
+func likeEscapeClause(fieldResolver FieldResolver) string {
+	if r, ok := fieldResolver.(interface{ LikeEscapeClause() string }); ok {
+		return r.LikeEscapeClause()
+	}
+
+	return defaultLikeEscapeClause
 }
 
 func buildResolversExpr(
 	left *ResolverResult,
 	op fexpr.SignOp,
 	right *ResolverResult,
+	likeEscape string,
 ) (dbx.Expression, error) {
 	var expr dbx.Expression
 
@@ -181,16 +192,16 @@ func buildResolversExpr(
 	case fexpr.SignLike, fexpr.SignAnyLike:
 		// the right side is a column and therefor wrap it with "%" for contains like behavior
 		if len(right.Params) == 0 {
-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%') ESCAPE '\\'", left.Identifier, right.Identifier), left.Params)
+			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
 		} else {
-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s ESCAPE '\\'", left.Identifier, right.Identifier), mergeParams(left.Params, wrapLikeParams(right.Params)))
+			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
 		}
 	case fexpr.SignNlike, fexpr.SignAnyNlike:
 		// the right side is a column and therefor wrap it with "%" for not-contains like behavior
 		if len(right.Params) == 0 {
-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%') ESCAPE '\\'", left.Identifier, right.Identifier), left.Params)
+			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
 		} else {
-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s ESCAPE '\\'", left.Identifier, right.Identifier), mergeParams(left.Params, wrapLikeParams(right.Params)))
+			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
 		}
 	case fexpr.SignLt, fexpr.SignAnyLt:
 		expr = dbx.NewExp(fmt.Sprintf("%s < %s", left.Identifier, right.Identifier), mergeParams(left.Params, right.Params))
@@ -650,6 +661,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
 			// doesn't matter whether it is applied on the left or right subquery operand
 			AfterBuild: dbx.Not, // inverse for the not-exist expression
 		},
+		defaultLikeEscapeClause,
 	)
 
 	if buildErr != nil {
@@ -708,9 +720,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
 	var buildErr error
 
 	if e.inverse {
-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1)
+		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause)
 	} else {
-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2)
+		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause)
 	}
 
 	if buildErr != nil {
