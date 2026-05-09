@@ -52,7 +52,7 @@ scripts/export-mysql-patches.sh <new-base-ref>
 
 ## MySQL QA Script
 
-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, and checks a text `LIKE` filter.
+`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, updates a collection schema with a select field, and verifies single/multiple select record behavior.
 
 Requirements:
 
