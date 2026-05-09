@@ -93,6 +93,15 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 		toRename := map[string]string{}
 		for _, field := range newFields {
 			oldField := oldFields.GetById(field.GetId())
+			if oldField == nil && isMySQLDataDB(txApp) {
+				_, err := txApp.DB().AddColumn(newTableName, field.GetName(), field.ColumnType(txApp)).Execute()
+				if err != nil {
+					return fmt.Errorf("failed to add column %s - %w", field.GetName(), err)
+				}
+
+				continue
+			}
+
 			// Note:
 			// We are using a temporary column name when adding or renaming columns
 			// to ensure that there are no name collisions in case there is
@@ -312,7 +321,12 @@ func dropCollectionIndexes(app App, collection *Collection) error {
 				continue
 			}
 
-			_, err := txApp.DB().NewQuery(fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", parsed.IndexName)).Execute()
+			dropQuery := fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", parsed.IndexName)
+			if isMySQLDataDB(txApp) {
+				dropQuery = fmt.Sprintf("DROP INDEX [[%s]] ON [[%s]]", parsed.IndexName, collection.Name)
+			}
+
+			_, err := txApp.DB().NewQuery(dropQuery).Execute()
 			if err != nil {
 				return err
 			}
