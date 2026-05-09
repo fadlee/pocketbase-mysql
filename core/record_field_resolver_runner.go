@@ -585,10 +585,11 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 					on = dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias+"."+cleanBackFieldName+"]]", "[["+r.activeTableAlias+".id]]"))
 				} else {
 					on = dbx.NewExp(fmt.Sprintf(
-						"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
+						"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+						r.activeTableAlias,
+						jeAlias,
 						dbutils.JSONEach(newTableAlias+"."+cleanBackFieldName),
 						jeAlias,
-						relationValueEquals(r.resolver, "[["+r.activeTableAlias+".id]]", "[["+jeAlias+".value]]"),
 					))
 				}
 
@@ -637,10 +638,11 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 							}
 
 							return dbx.NewExp(fmt.Sprintf(
-								"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
+								"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+								r.multiMatchActiveTableAlias,
+								jeAlias2,
 								dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
 								jeAlias2,
-								relationValueEquals(r.resolver, "[["+r.multiMatchActiveTableAlias+".id]]", "[["+jeAlias2+".value]]"),
 							))
 						}(),
 					},
