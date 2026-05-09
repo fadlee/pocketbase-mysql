@@ -56,6 +56,10 @@ const (
 // Common field errors.
 
 func isMySQLDataDB(app App) bool {
+	return IsMySQLDataDB(app)
+}
+
+func IsMySQLDataDB(app App) bool {
 	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
 		return true
 	}
