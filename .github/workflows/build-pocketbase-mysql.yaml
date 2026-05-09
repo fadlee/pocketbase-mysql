@@ -1,0 +1,57 @@
+name: build-pocketbase-mysql
+
+on:
+  push:
+    branches:
+      - '**'
+  pull_request:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+            binary_suffix: ''
+          - os: ubuntu-latest
+            goos: linux
+            goarch: arm64
+            binary_suffix: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: amd64
+            binary_suffix: ''
+          - os: macos-latest
+            goos: darwin
+            goarch: arm64
+            binary_suffix: ''
+          - os: windows-latest
+            goos: windows
+            goarch: amd64
+            binary_suffix: '.exe'
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: '1.25.0'
+
+      - name: Build pocketbase-mysql
+        env:
+          CGO_ENABLED: 0
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: go build -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: pocketbase-mysql${{ matrix.binary_suffix }}
+          if-no-files-found: error
