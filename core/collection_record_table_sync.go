@@ -26,7 +26,7 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 	txErr := app.RunInTransaction(func(txApp App) error {
 		// create
 		// -----------------------------------------------------------
-		if oldCollection == nil || !app.HasTable(oldCollection.Name) {
+		if oldCollection == nil || !recordTableExistsForSchemaSync(app, txApp, oldCollection.Name) {
 			tableName := newCollection.Name
 
 			fields := newCollection.Fields
@@ -101,6 +101,20 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 
 				continue
 			}
+			if oldField != nil && oldField.GetName() != field.GetName() && isMySQLDataDB(txApp) {
+				_, err := txApp.DB().NewQuery(fmt.Sprintf(
+					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
+					newTableName,
+					oldField.GetName(),
+					field.GetName(),
+					field.ColumnType(txApp),
+				)).Execute()
+				if err != nil {
+					return fmt.Errorf("failed to rename column %s - %w", oldField.GetName(), err)
+				}
+
+				continue
+			}
 
 			// Note:
 			// We are using a temporary column name when adding or renaming columns
@@ -163,6 +177,24 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 	return nil
 }
 
+func recordTableExistsForSchemaSync(app App, txApp App, tableName string) bool {
+	if !isMySQLDataDB(txApp) {
+		return app.HasTable(tableName)
+	}
+
+	var exists int
+	err := txApp.DB().NewQuery(`
+		SELECT 1
+		FROM information_schema.TABLES
+		WHERE TABLE_SCHEMA = DATABASE()
+			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+			AND LOWER(TABLE_NAME) = LOWER({:tableName})
+		LIMIT 1
+	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
+
+	return err == nil && exists > 0
+}
+
 func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, oldCollection *Collection) error {
 	if newCollection.IsView() || oldCollection == nil {
 		return nil // view or not an update
@@ -170,10 +202,12 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 
 	return app.RunInTransaction(func(txApp App) error {
 		for _, newField := range newCollection.Fields {
+			oldField := oldCollection.Fields.GetById(newField.GetId())
+
 			// allow to continue even if there is no old field for the cases
 			// when a new field is added and there are already inserted data
 			var isOldMultiple bool
-			if oldField := oldCollection.Fields.GetById(newField.GetId()); oldField != nil {
+			if oldField != nil {
 				if mv, ok := oldField.(MultiValuer); ok {
 					isOldMultiple = mv.IsMultiple()
 				}
@@ -198,11 +232,19 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 				Name string `db:"name"`
 				SQL  string `db:"sql"`
 			}{}
-			err := txApp.DB().Select("name", "sql").
-				From("sqlite_master").
-				AndWhere(dbx.NewExp("sql is not null")).
-				AndWhere(dbx.HashExp{"type": "view"}).
-				All(&views)
+			var err error
+			if isMySQLDataDB(txApp) {
+				err = txApp.DB().Select("TABLE_NAME AS name", "VIEW_DEFINITION AS sql").
+					From("information_schema.VIEWS").
+					AndWhere(dbx.NewExp("TABLE_SCHEMA = DATABASE()")).
+					All(&views)
+			} else {
+				err = txApp.DB().Select("name", "sql").
+					From("sqlite_master").
+					AndWhere(dbx.NewExp("sql is not null")).
+					AndWhere(dbx.HashExp{"type": "view"}).
+					All(&views)
+			}
 			if err != nil {
 				return err
 			}
@@ -217,7 +259,17 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 			oldTempName := "_" + newField.GetName() + security.PseudorandomString(5)
 
 			// rename temporary the original column to something else to allow inserting a new one in its place
-			_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
+			if isMySQLDataDB(txApp) {
+				_, err = txApp.DB().NewQuery(fmt.Sprintf(
+					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
+					newCollection.Name,
+					originalName,
+					oldTempName,
+					oldField.ColumnType(txApp),
+				)).Execute()
+			} else {
+				_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
+			}
 			if err != nil {
 				return err
 			}
@@ -232,8 +284,32 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 
 			if !isOldMultiple && isNewMultiple {
 				// single -> multiple (convert to array)
-				copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
-					`UPDATE {{%s}} set [[%s]] = (
+				if isMySQLDataDB(txApp) {
+					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+						`UPDATE {{%s}} set [[%s]] = (
+							CASE
+								WHEN COALESCE([[%s]], '') = ''
+								THEN JSON_ARRAY()
+								ELSE (
+									CASE
+										WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
+										THEN [[%s]]
+										ELSE JSON_ARRAY([[%s]])
+									END
+								)
+							END
+						)`,
+						newCollection.Name,
+						originalName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+					))
+				} else {
+					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+						`UPDATE {{%s}} set [[%s]] = (
 							CASE
 								WHEN COALESCE([[%s]], '') = ''
 								THEN '[]'
@@ -246,41 +322,64 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 								)
 							END
 						)`,
-					newCollection.Name,
-					originalName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-				))
+						newCollection.Name,
+						originalName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+					))
+				}
 			} else {
 				// multiple -> single (keep only the last element)
 				//
 				// note: for file fields the actual file objects are not
 				// deleted allowing additional custom handling via migration
-				copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
-					`UPDATE {{%s}} set [[%s]] = (
-						CASE
-							WHEN COALESCE([[%s]], '[]') = '[]'
-							THEN ''
-							ELSE (
-								CASE
-									WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
-									THEN COALESCE(json_extract([[%s]], '$[#-1]'), '')
-									ELSE [[%s]]
-								END
-							)
-						END
-					)`,
-					newCollection.Name,
-					originalName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-					oldTempName,
-				))
+				if isMySQLDataDB(txApp) {
+					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+						`UPDATE {{%s}} set [[%s]] = (
+							CASE
+								WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
+								THEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT([[%s]], CONCAT('$[', JSON_LENGTH([[%s]]) - 1, ']'))), '')
+								WHEN COALESCE([[%s]], '') = ''
+								THEN ''
+								ELSE [[%s]]
+							END
+						)`,
+						newCollection.Name,
+						originalName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+					))
+				} else {
+					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+						`UPDATE {{%s}} set [[%s]] = (
+							CASE
+								WHEN COALESCE([[%s]], '[]') = '[]'
+								THEN ''
+								ELSE (
+									CASE
+										WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
+										THEN COALESCE(json_extract([[%s]], '$[#-1]'), '')
+										ELSE [[%s]]
+									END
+								)
+							END
+						)`,
+						newCollection.Name,
+						originalName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+						oldTempName,
+					))
+				}
 			}
 
 			// copy the normalized values
