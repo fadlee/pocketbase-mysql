@@ -128,6 +128,70 @@ curl -sS -f -X POST "$base_url/api/collections/qa_multi_select/records" \
 curl -sS -f "$base_url/api/collections/qa_multi_select/records?filter=tags~%22alpha%22" \
 	> "$tmp_dir/filter_multi_select_records.json"
 
+matrix_id="$(jq -r '.id' "$tmp_dir/create_multi_select_collection.json")"
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_matrix","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}]}' \
+	> "$tmp_dir/create_matrix_collection.json"
+
+matrix_id="$(jq -r '.id' "$tmp_dir/create_matrix_collection.json")"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"title":"before matrix","status":"draft"}' \
+	> "$tmp_dir/create_matrix_record.json"
+
+jq '(.fields[] | select(.name == "status") | .name) = "state" | {fields:.fields}' \
+	"$tmp_dir/create_matrix_collection.json" > "$tmp_dir/matrix_rename_payload.json"
+
+curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data @"$tmp_dir/matrix_rename_payload.json" \
+	> "$tmp_dir/matrix_rename_result.json"
+sleep 1
+
+jq '.fields |= map(select(.name != "title")) | {fields:.fields}' \
+	"$tmp_dir/matrix_rename_result.json" > "$tmp_dir/matrix_delete_payload.json"
+
+curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data @"$tmp_dir/matrix_delete_payload.json" \
+	> "$tmp_dir/matrix_delete_result.json"
+sleep 1
+
+jq '(.fields[] | select(.name == "state") | .maxSelect) = 3 | (.fields[] | select(.name == "state") | .values) = ["draft","published","archived"] | {fields:.fields}' \
+	"$tmp_dir/matrix_delete_result.json" > "$tmp_dir/matrix_single_to_multi_payload.json"
+
+curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data @"$tmp_dir/matrix_single_to_multi_payload.json" \
+	> "$tmp_dir/matrix_single_to_multi_result.json"
+sleep 1
+
+curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"state":["draft","published"]}' \
+	> "$tmp_dir/create_matrix_multi_record.json"
+
+curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state~%22draft%22" \
+	> "$tmp_dir/filter_matrix_multi_records.json"
+
+jq '(.fields[] | select(.name == "state") | .maxSelect) = 1 | {fields:.fields}' \
+	"$tmp_dir/matrix_single_to_multi_result.json" > "$tmp_dir/matrix_multi_to_single_payload.json"
+
+curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data @"$tmp_dir/matrix_multi_to_single_payload.json" \
+	> "$tmp_dir/matrix_multi_to_single_result.json"
+
+curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state=%22published%22" \
+	> "$tmp_dir/filter_matrix_single_records.json"
+
 if grep -q "ERROR" "$tmp_dir/pb.log"; then
 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
 	grep "ERROR" "$tmp_dir/pb.log" >&2

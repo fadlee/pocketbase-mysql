@@ -409,3 +409,15 @@ POST /api/collections qa_multi_select with tags maxSelect=3 -> 200
 POST /api/collections/qa_multi_select/records with tags ["alpha","beta"] -> 200
 GET /api/collections/qa_multi_select/records?filter=tags~"alpha" -> 200
 ```
+
+The remaining schema update matrix cases also now pass on MySQL:
+
+```text
+PATCH rename status -> state -> 200
+PATCH delete title -> 200
+PATCH single select -> multi select -> 200
+POST /api/collections/qa_matrix/records with state ["draft","published"] -> 200
+GET /api/collections/qa_matrix/records?filter=state~"draft" -> 200
+PATCH multi select -> single select -> 200
+GET /api/collections/qa_matrix/records?filter=state="published" -> 200
+```
