@@ -298,3 +298,30 @@ Interpretation:
 - The current PoC can boot PocketBase against MySQL and reach the server start state.
 - Remaining warnings still include SQLite-specific maintenance/introspection calls such as `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master` during schema/cache operations.
 - Next work should shift from boot blockers to a focused audit of runtime correctness: introspection helpers, CRUD record creation, auth login, index semantics, and JSON/list fields.
+
+## Runtime QA Record List Count Result
+
+The first focused runtime QA pass confirmed that a fresh MySQL 8.4 backend can boot, create a superuser, authenticate through the REST API, create a simple base collection through the collections API, and insert a simple record.
+
+The first runtime blocker appeared when listing records with pagination metadata:
+
+```text
+SELECT `qa_posts`.* FROM `qa_posts` ORDER BY `qa_posts`.`title` ASC LIMIT 30
+SELECT COUNT(DISTINCT `qa_posts`.`_rowid_`) FROM `qa_posts`
+ERROR GET /api/collections/qa_posts/records?sort=title
+└─ Error 1054 (42S22): Unknown column 'qa_posts._rowid_' in 'field list'
+```
+
+The records list API now keeps the SQLite `_rowid_` count optimization only for SQLite-backed record tables. MySQL leaves the search provider default `id` count column, producing a portable count query for normal record collections.
+
+Manual QA with a fresh MySQL 8.4 container now passes the simple runtime CRUD probe:
+
+```text
+POST /api/collections/_superusers/auth-with-password -> 200
+POST /api/collections -> 200
+POST /api/collections/qa_posts/records -> 200
+GET /api/collections/qa_posts/records?sort=title -> 200
+{"totalItems":1,"totalPages":1}
+```
+
+Remaining warnings still include MySQL-incompatible SQLite maintenance/introspection queries during schema sync, especially `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master`. The next runtime QA target should exercise schema changes and index/list/JSON fields to turn those warnings into concrete compatibility fixes.
