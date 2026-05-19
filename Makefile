@@ -1,8 +1,11 @@
 lint:
 	golangci-lint run -c ./golangci.yml ./...
 
+VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+LDFLAGS = -ldflags "-X github.com/pocketbase/pocketbase.Version=$(VERSION)"
+
 build:
-	go build -o pocketbase-mysql ./examples/base
+	go build $(LDFLAGS) -o pocketbase-mysql ./examples/base
 
 test:
 	go test ./... -v --cover
