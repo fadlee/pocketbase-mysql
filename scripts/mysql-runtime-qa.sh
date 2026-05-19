@@ -256,6 +256,255 @@ curl -sS -f "$base_url/api/collections/qa_books_view/records?sort=title" \
 	-H "Authorization: Bearer ${token}" \
 	> "$tmp_dir/list_books_view_after_update.json"
 
+# ============================================================
+# All field types test
+# ============================================================
+
+echo "Testing all field types..."
+
+# Create a file collection for relation reference
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"name":"qa_ref","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"label","type":"text","required":true}]}' \
+	> "$tmp_dir/create_qa_ref.json"
+
+qa_ref_id="$(jq -r '.id' "$tmp_dir/create_qa_ref.json")"
+
+curl -sS -f -X POST "$base_url/api/collections/qa_ref/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"label":"ref-one"}' \
+	> "$tmp_dir/create_qa_ref_record.json"
+
+qa_ref_record_id="$(jq -r '.id' "$tmp_dir/create_qa_ref_record.json")"
+
+# Create collection with all supported field types
+curl -sS -f -X POST "$base_url/api/collections" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{
+		"name":"qa_all_fields",
+		"type":"base",
+		"listRule":"",
+		"viewRule":"",
+		"createRule":"",
+		"updateRule":"",
+		"deleteRule":"",
+		"fields":[
+			{"name":"f_text","type":"text","required":false,"max":500},
+			{"name":"f_number","type":"number","required":false},
+			{"name":"f_bool","type":"bool","required":false},
+			{"name":"f_email","type":"email","required":false},
+			{"name":"f_url","type":"url","required":false},
+			{"name":"f_date","type":"date","required":false},
+			{"name":"f_select_single","type":"select","required":false,"values":["a","b","c"],"maxSelect":1},
+			{"name":"f_select_multi","type":"select","required":false,"values":["x","y","z"],"maxSelect":3},
+			{"name":"f_json","type":"json","required":false},
+			{"name":"f_editor","type":"editor","required":false},
+			{"name":"f_relation","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":1},
+			{"name":"f_relation_multi","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":5}
+		]
+	}' \
+	> "$tmp_dir/create_qa_all_fields.json"
+
+qa_all_fields_id="$(jq -r '.id' "$tmp_dir/create_qa_all_fields.json")"
+
+# Create record with all fields populated
+curl -sS -f -X POST "$base_url/api/collections/qa_all_fields/records" \
+	-H 'Content-Type: application/json' \
+	--data '{
+		"f_text":"hello world",
+		"f_number":42.5,
+		"f_bool":true,
+		"f_email":"test@example.com",
+		"f_url":"https://example.com",
+		"f_date":"2026-01-15 10:00:00.000Z",
+		"f_select_single":"a",
+		"f_select_multi":["x","y"],
+		"f_json":{"key":"value","num":123},
+		"f_editor":"<p>rich text</p>",
+		"f_relation":"'"${qa_ref_record_id}"'",
+		"f_relation_multi":["'"${qa_ref_record_id}"'"]
+	}' \
+	> "$tmp_dir/create_qa_all_fields_record.json"
+
+qa_all_fields_record_id="$(jq -r '.id' "$tmp_dir/create_qa_all_fields_record.json")"
+
+# Read back the record and verify fields
+curl -sS -f "$base_url/api/collections/qa_all_fields/records/${qa_all_fields_record_id}" \
+	> "$tmp_dir/get_qa_all_fields_record.json"
+
+# Verify each field value
+jq -e '.f_text == "hello world"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_text mismatch" >&2; exit 1; }
+jq -e '.f_number == 42.5' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_number mismatch" >&2; exit 1; }
+jq -e '.f_bool == true' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_bool mismatch" >&2; exit 1; }
+jq -e '.f_email == "test@example.com"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_email mismatch" >&2; exit 1; }
+jq -e '.f_url == "https://example.com"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_url mismatch" >&2; exit 1; }
+jq -e '.f_select_single == "a"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_select_single mismatch" >&2; exit 1; }
+jq -e '.f_select_multi | length == 2' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_select_multi mismatch" >&2; exit 1; }
+jq -e '.f_editor == "<p>rich text</p>"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_editor mismatch" >&2; exit 1; }
+jq -e '.f_relation == "'"${qa_ref_record_id}"'"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_relation mismatch" >&2; exit 1; }
+jq -e '.f_relation_multi | length == 1' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_relation_multi mismatch" >&2; exit 1; }
+
+echo "All field type create/read: OK"
+
+# Update record - change several fields
+curl -sS -f -X PATCH "$base_url/api/collections/qa_all_fields/records/${qa_all_fields_record_id}" \
+	-H 'Content-Type: application/json' \
+	--data '{
+		"f_text":"updated text",
+		"f_number":99,
+		"f_bool":false,
+		"f_select_single":"b",
+		"f_select_multi":["z"]
+	}' \
+	> "$tmp_dir/update_qa_all_fields_record.json"
+
+jq -e '.f_text == "updated text"' "$tmp_dir/update_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_text update mismatch" >&2; exit 1; }
+jq -e '.f_number == 99' "$tmp_dir/update_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_number update mismatch" >&2; exit 1; }
+jq -e '.f_bool == false' "$tmp_dir/update_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_bool update mismatch" >&2; exit 1; }
+jq -e '.f_select_single == "b"' "$tmp_dir/update_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_select_single update mismatch" >&2; exit 1; }
+jq -e '.f_select_multi == ["z"]' "$tmp_dir/update_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_select_multi update mismatch" >&2; exit 1; }
+
+echo "All field type update: OK"
+
+# Filter by each field type
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_text~%22updated%22" \
+	> "$tmp_dir/filter_by_text.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_text.json" > /dev/null || { echo "FAIL: filter by f_text" >&2; exit 1; }
+
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_number%3E50" \
+	> "$tmp_dir/filter_by_number.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_number.json" > /dev/null || { echo "FAIL: filter by f_number" >&2; exit 1; }
+
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_bool%3Dfalse" \
+	> "$tmp_dir/filter_by_bool.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_bool.json" > /dev/null || { echo "FAIL: filter by f_bool" >&2; exit 1; }
+
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_email~%22example%22" \
+	> "$tmp_dir/filter_by_email.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_email.json" > /dev/null || { echo "FAIL: filter by f_email" >&2; exit 1; }
+
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_select_single%3D%22b%22" \
+	> "$tmp_dir/filter_by_select.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_select.json" > /dev/null || { echo "FAIL: filter by f_select_single" >&2; exit 1; }
+
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?filter=f_relation%3D%22${qa_ref_record_id}%22" \
+	> "$tmp_dir/filter_by_relation.json"
+jq -e '.items | length >= 1' "$tmp_dir/filter_by_relation.json" > /dev/null || { echo "FAIL: filter by f_relation" >&2; exit 1; }
+
+echo "All field type filters: OK"
+
+# Schema update: add a new field to qa_all_fields
+curl -sS -f -X PATCH "$base_url/api/collections/${qa_all_fields_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"fields":[
+		{"name":"f_text","type":"text","required":false,"max":500},
+		{"name":"f_number","type":"number","required":false},
+		{"name":"f_bool","type":"bool","required":false},
+		{"name":"f_email","type":"email","required":false},
+		{"name":"f_url","type":"url","required":false},
+		{"name":"f_date","type":"date","required":false},
+		{"name":"f_select_single","type":"select","required":false,"values":["a","b","c"],"maxSelect":1},
+		{"name":"f_select_multi","type":"select","required":false,"values":["x","y","z"],"maxSelect":3},
+		{"name":"f_json","type":"json","required":false},
+		{"name":"f_editor","type":"editor","required":false},
+		{"name":"f_relation","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":1},
+		{"name":"f_relation_multi","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":5},
+		{"name":"f_new_text","type":"text","required":false,"max":100}
+	]}' \
+	> "$tmp_dir/schema_add_field.json"
+
+# Create record using new field
+curl -sS -f -X POST "$base_url/api/collections/qa_all_fields/records" \
+	-H 'Content-Type: application/json' \
+	--data '{"f_text":"after schema add","f_new_text":"new field value"}' \
+	> "$tmp_dir/create_after_schema_add.json"
+
+jq -e '.f_new_text == "new field value"' "$tmp_dir/create_after_schema_add.json" > /dev/null || { echo "FAIL: f_new_text after schema add" >&2; exit 1; }
+
+echo "Schema add field: OK"
+
+# Schema update: rename f_new_text -> f_renamed_text
+curl -sS -f -X PATCH "$base_url/api/collections/${qa_all_fields_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"fields":[
+		{"name":"f_text","type":"text","required":false,"max":500},
+		{"name":"f_number","type":"number","required":false},
+		{"name":"f_bool","type":"bool","required":false},
+		{"name":"f_email","type":"email","required":false},
+		{"name":"f_url","type":"url","required":false},
+		{"name":"f_date","type":"date","required":false},
+		{"name":"f_select_single","type":"select","required":false,"values":["a","b","c"],"maxSelect":1},
+		{"name":"f_select_multi","type":"select","required":false,"values":["x","y","z"],"maxSelect":3},
+		{"name":"f_json","type":"json","required":false},
+		{"name":"f_editor","type":"editor","required":false},
+		{"name":"f_relation","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":1},
+		{"name":"f_relation_multi","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":5},
+		{"name":"f_renamed_text","type":"text","required":false,"max":100}
+	]}' \
+	> "$tmp_dir/schema_rename_field.json"
+
+sleep 1
+
+# Verify old records still readable after rename
+curl -sS -f "$base_url/api/collections/qa_all_fields/records/${qa_all_fields_record_id}" \
+	> "$tmp_dir/get_after_rename.json"
+jq -e '.f_text == "updated text"' "$tmp_dir/get_after_rename.json" > /dev/null || { echo "FAIL: existing record unreadable after rename" >&2; exit 1; }
+
+echo "Schema rename field: OK"
+
+# Schema update: delete f_renamed_text
+curl -sS -f -X PATCH "$base_url/api/collections/${qa_all_fields_id}" \
+	-H "Authorization: Bearer ${token}" \
+	-H 'Content-Type: application/json' \
+	--data '{"fields":[
+		{"name":"f_text","type":"text","required":false,"max":500},
+		{"name":"f_number","type":"number","required":false},
+		{"name":"f_bool","type":"bool","required":false},
+		{"name":"f_email","type":"email","required":false},
+		{"name":"f_url","type":"url","required":false},
+		{"name":"f_date","type":"date","required":false},
+		{"name":"f_select_single","type":"select","required":false,"values":["a","b","c"],"maxSelect":1},
+		{"name":"f_select_multi","type":"select","required":false,"values":["x","y","z"],"maxSelect":3},
+		{"name":"f_json","type":"json","required":false},
+		{"name":"f_editor","type":"editor","required":false},
+		{"name":"f_relation","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":1},
+		{"name":"f_relation_multi","type":"relation","required":false,"collectionId":"'"${qa_ref_id}"'","maxSelect":5}
+	]}' \
+	> "$tmp_dir/schema_delete_field.json"
+
+sleep 1
+
+# Verify records still readable after delete
+curl -sS -f "$base_url/api/collections/qa_all_fields/records/${qa_all_fields_record_id}" \
+	> "$tmp_dir/get_after_delete_field.json"
+jq -e '.f_text == "updated text"' "$tmp_dir/get_after_delete_field.json" > /dev/null || { echo "FAIL: existing record unreadable after field delete" >&2; exit 1; }
+jq -e 'has("f_renamed_text") | not' "$tmp_dir/get_after_delete_field.json" > /dev/null || { echo "FAIL: deleted field still present" >&2; exit 1; }
+
+echo "Schema delete field: OK"
+
+# Sort by each field type
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=f_text" > /dev/null || { echo "FAIL: sort by f_text" >&2; exit 1; }
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-f_number" > /dev/null || { echo "FAIL: sort by f_number" >&2; exit 1; }
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-f_date" > /dev/null || { echo "FAIL: sort by f_date" >&2; exit 1; }
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-created,-id" > /dev/null || { echo "FAIL: sort by -created,-id" >&2; exit 1; }
+
+echo "All field type sorts: OK"
+
+# Expand relation
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?expand=f_relation" \
+	> "$tmp_dir/expand_all_fields_relation.json"
+jq -e '.items[0].expand.f_relation.label == "ref-one"' "$tmp_dir/expand_all_fields_relation.json" > /dev/null || { echo "FAIL: expand f_relation" >&2; exit 1; }
+
+echo "Relation expand: OK"
+
+echo "All field types QA: PASSED"
+
+# ============================================================
+
 if grep -q "ERROR" "$tmp_dir/pb.log"; then
 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
 	grep "ERROR" "$tmp_dir/pb.log" >&2

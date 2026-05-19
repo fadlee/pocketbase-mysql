@@ -12,6 +12,11 @@ import (
 // see https://github.com/pocketbase/pocketbase/issues/7689
 func init() {
 	core.SystemMigrations.Register(func(txApp core.App) error {
+		// skip for MySQL - sqlite_master is not available
+		if core.IsMySQLDataDB(txApp) {
+			return nil
+		}
+
 		collections, err := txApp.FindAllCollections()
 		if err != nil {
 			return err
