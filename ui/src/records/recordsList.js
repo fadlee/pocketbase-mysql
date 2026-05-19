@@ -110,8 +110,8 @@ window.app.components.recordsList = function(propsArg = {}) {
                 ? props.collection.fields.find((f) => !f.hidden && f.name === sortMatch[2])
                 : null;
             if (!sortField) {
-                // default fallback to -@rowid when available
-                normalizedSort = props.collection.type != "view" ? "-@rowid" : undefined;
+                // Prefer a portable fallback so record listing works with both SQLite and MySQL.
+                normalizedSort = props.collection.type != "view" ? "-created,-id" : undefined;
             } else if (sortField?.type == "relation") {
                 normalizedSort = app.store.collections
                     ?.find((c) => c.id == sortField.collectionId)

@@ -211,6 +211,14 @@ export function docsList(collection) {
                             t.code({ hidden: () => collection.type == "view" }, "@rowid"),
                             ".",
                         ),
+                        t.p(
+                            { hidden: () => collection.type == "view" },
+                            "Note: ",
+                            t.code(null, "@rowid"),
+                            " is SQLite-specific. MySQL-backed apps should use portable fields like ",
+                            t.code(null, "-created,-id"),
+                            ".",
+                        ),
                     ),
                 ),
                 t.tr(
