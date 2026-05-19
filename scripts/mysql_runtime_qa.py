@@ -131,6 +131,19 @@ class QA:
             self.binary.unlink()
         subprocess.run(["go", "build", "-o", str(self.binary), "./examples/base"], cwd=self.repo_root, check=True)
 
+    def db_cli_flags(self) -> list:
+        """Return CLI flags for MySQL database connection."""
+        flags = [
+            "--db-driver", "mysql",
+            "--db-host", self.args.mysql_host,
+            "--db-port", str(self.args.mysql_port),
+            "--db-user", self.args.mysql_user,
+            "--db-name", self.args.mysql_database,
+        ]
+        if self.args.mysql_password != "":
+            flags += ["--db-password", self.args.mysql_password]
+        return flags
+
     def start_server(self):
         if self.pb_data.exists():
             shutil.rmtree(self.pb_data)
@@ -138,14 +151,14 @@ class QA:
             shutil.rmtree(self.pb_migrations)
         if self.pb_log.exists():
             self.pb_log.unlink()
-        env = os.environ.copy()
-        env["PB_DATABASE_DRIVER"] = "mysql"
-        env["PB_DATABASE_DSN"] = self.mysql_dsn()
         with self.pb_log.open("w", encoding="utf-8") as log_file:
             self.pb_proc = subprocess.Popen(
-                [str(self.binary), "serve", "--dir", str(self.pb_data), "--migrationsDir", str(self.pb_migrations), "--http", self.args.http_addr],
+                [str(self.binary), "serve",
+                 "--dir", str(self.pb_data),
+                 "--migrationsDir", str(self.pb_migrations),
+                 "--http", self.args.http_addr]
+                + self.db_cli_flags(),
                 cwd=self.repo_root,
-                env=env,
                 stdout=log_file,
                 stderr=subprocess.STDOUT,
             )
@@ -158,13 +171,12 @@ class QA:
         raise RuntimeError("Server did not start in time")
 
     def create_superuser_and_auth(self):
-        env = os.environ.copy()
-        env["PB_DATABASE_DRIVER"] = "mysql"
-        env["PB_DATABASE_DSN"] = self.mysql_dsn()
         subprocess.run(
-            [str(self.binary), "superuser", "upsert", "qa@example.com", "password123", "--dir", str(self.pb_data), "--migrationsDir", str(self.pb_migrations)],
+            [str(self.binary), "superuser", "upsert", "qa@example.com", "password123",
+             "--dir", str(self.pb_data),
+             "--migrationsDir", str(self.pb_migrations)]
+            + self.db_cli_flags(),
             cwd=self.repo_root,
-            env=env,
             check=True,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
