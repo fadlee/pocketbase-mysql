@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -79,7 +80,74 @@ func main() {
 		"fallback the request to index.html on missing static path, e.g. when pretty urls are used with SPA",
 	)
 
+	// ---------------------------------------------------------------
+	// MySQL database flags:
+	// ---------------------------------------------------------------
+
+	var dbDriver string
+	app.RootCmd.PersistentFlags().StringVar(
+		&dbDriver,
+		"db-driver",
+		"",
+		"database driver to use (default: sqlite; use 'mysql' for MySQL/MariaDB)",
+	)
+
+	var dbHost string
+	app.RootCmd.PersistentFlags().StringVar(
+		&dbHost,
+		"db-host",
+		"127.0.0.1",
+		"MySQL host (used when --db-driver=mysql)",
+	)
+
+	var dbPort int
+	app.RootCmd.PersistentFlags().IntVar(
+		&dbPort,
+		"db-port",
+		3306,
+		"MySQL port (used when --db-driver=mysql)",
+	)
+
+	var dbUser string
+	app.RootCmd.PersistentFlags().StringVar(
+		&dbUser,
+		"db-user",
+		"root",
+		"MySQL user (used when --db-driver=mysql)",
+	)
+
+	var dbPassword string
+	app.RootCmd.PersistentFlags().StringVar(
+		&dbPassword,
+		"db-password",
+		"",
+		"MySQL password (used when --db-driver=mysql)",
+	)
+
+	var dbName string
+	app.RootCmd.PersistentFlags().StringVar(
+		&dbName,
+		"db-name",
+		"pocketbase",
+		"MySQL database name (used when --db-driver=mysql)",
+	)
+
 	app.RootCmd.ParseFlags(os.Args[1:])
+
+	// Apply MySQL flags: CLI flags take priority over env vars.
+	// Only override env vars if --db-driver flag was explicitly provided.
+	if dbDriver != "" {
+		os.Setenv("PB_DATABASE_DRIVER", dbDriver)
+		if dbDriver == "mysql" {
+			creds := dbUser
+			if dbPassword != "" {
+				creds += ":" + dbPassword
+			}
+			dsn := fmt.Sprintf("%s@tcp(%s:%d)/%s?parseTime=true&multiStatements=true",
+				creds, dbHost, dbPort, dbName)
+			os.Setenv("PB_DATABASE_DSN", dsn)
+		}
+	}
 
 	// ---------------------------------------------------------------
 	// Plugins and hooks:

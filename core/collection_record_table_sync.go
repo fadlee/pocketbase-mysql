@@ -260,6 +260,14 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 
 			// rename temporary the original column to something else to allow inserting a new one in its place
 			if isMySQLDataDB(txApp) {
+				if oldField == nil {
+					// no old field to rename, just add the new column directly
+					_, err = txApp.DB().AddColumn(newCollection.Name, originalName, newField.ColumnType(txApp)).Execute()
+					if err != nil {
+						return fmt.Errorf("failed to add column %s - %w", originalName, err)
+					}
+					continue
+				}
 				_, err = txApp.DB().NewQuery(fmt.Sprintf(
 					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
 					newCollection.Name,
