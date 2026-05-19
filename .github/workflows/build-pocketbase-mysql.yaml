@@ -16,22 +16,27 @@ jobs:
             goos: linux
             goarch: amd64
             binary_suffix: ''
+            native: true
           - os: ubuntu-latest
             goos: linux
             goarch: arm64
             binary_suffix: ''
+            native: false
           - os: macos-latest
             goos: darwin
             goarch: amd64
             binary_suffix: ''
+            native: true
           - os: macos-latest
             goos: darwin
             goarch: arm64
             binary_suffix: ''
+            native: true
           - os: windows-latest
             goos: windows
             goarch: amd64
             binary_suffix: '.exe'
+            native: true
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout
@@ -55,12 +60,13 @@ jobs:
           CGO_ENABLED: 0
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+        shell: bash
         run: |
           VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
           go build -ldflags "-X github.com/pocketbase/pocketbase.Version=${VERSION}" -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
 
       - name: Validate embedded UI (Unix)
-        if: runner.os != 'Windows'
+        if: runner.os != 'Windows' && matrix.native == true
         shell: bash
         run: |
           ./pocketbase-mysql${{ matrix.binary_suffix }} serve --http 127.0.0.1:18090 > pb.log 2>&1 &
