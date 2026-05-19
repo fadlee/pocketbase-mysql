@@ -56,7 +56,8 @@ export function logsList(logsSettings) {
 
             const result = await app.pb.logs.getList(page, perPage, {
                 skipTotal: 1,
-                sort: "-@rowid",
+                // Use portable fields so the logs page works with both SQLite and MySQL.
+                sort: "-created,-id",
                 requestKey: "logs_list",
                 filter: normalizedFilter
                     .filter(Boolean)
