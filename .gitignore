@@ -18,3 +18,13 @@ CHANGELOG.html
 CHANGELOG_16_22.html
 CHANGELOG_8_15.html
 LICENSE.html
+
+# local runtime artifacts
+/.agents/
+/pb_data/
+/pb-mysql.log
+/pb-server.log
+/pocketbase-mysql
+/pocketbase-mysql.exe
+/pocketbase-mysql~
+/skills-lock.json
