@@ -16,7 +16,7 @@ This repository is a PocketBase fork that adds a MySQL-backed data DB PoC while 
 
 Current baseline:
 
-- upstream source imported from PocketBase `v0.38.0`
+- upstream source imported from PocketBase `v0.38.1`
 - active development branch: `mysql/main`
 - upstream remote kept as `upstream`
 - GitHub fork repo: `fadlee/pocketbase-mysql`
