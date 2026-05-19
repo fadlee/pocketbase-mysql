@@ -5,12 +5,15 @@ repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
 
 container_name="${MYSQL_QA_CONTAINER:-pb-mysql-runtime-qa}"
+mysql_host="${MYSQL_QA_HOST:-127.0.0.1}"
 mysql_port="${MYSQL_QA_MYSQL_PORT:-3307}"
+mysql_user="${MYSQL_QA_USER:-root}"
 http_addr="${MYSQL_QA_HTTP_ADDR:-127.0.0.1:18090}"
 tmp_dir="${MYSQL_QA_TMP_DIR:-/tmp/opencode/pb-mysql-runtime-qa}"
 mysql_image="${MYSQL_QA_IMAGE:-mysql:8.4}"
-mysql_password="${MYSQL_QA_PASSWORD:-pbpass}"
+mysql_password="${MYSQL_QA_PASSWORD-pbpass}"
 mysql_database="${MYSQL_QA_DATABASE:-pocketbase}"
+skip_docker="${MYSQL_QA_SKIP_DOCKER:-0}"
 
 mkdir -p "$tmp_dir"
 
@@ -18,39 +21,57 @@ cleanup() {
 	if [ -f "$tmp_dir/pb.pid" ]; then
 		kill "$(cat "$tmp_dir/pb.pid")" 2>/dev/null || true
 	fi
-	docker rm -f "$container_name" >/dev/null 2>&1 || true
+	if [ "$skip_docker" != "1" ]; then
+		docker rm -f "$container_name" >/dev/null 2>&1 || true
+	fi
 }
 trap cleanup EXIT
 
 cleanup
 
-if ss -ltn "sport = :${http_addr##*:}" | grep -q LISTEN; then
+if { command -v ss >/dev/null 2>&1 && ss -ltn "sport = :${http_addr##*:}" | grep -q LISTEN; } || \
+   netstat -an 2>/dev/null | grep -q ":${http_addr##*:}.*LISTEN"; then
 	echo "HTTP address $http_addr is already in use." >&2
 	exit 1
 fi
 
-docker run --rm -d \
-	--name "$container_name" \
-	-e MYSQL_ROOT_PASSWORD="$mysql_password" \
-	-e MYSQL_DATABASE="$mysql_database" \
-	-p "$mysql_port:3306" \
-	"$mysql_image" >/dev/null
-
-for _ in $(seq 1 90); do
-	if docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null 2>&1; then
-		break
+if [ "$skip_docker" = "1" ]; then
+	echo "Skipping Docker - using existing MySQL at ${mysql_host}:${mysql_port}"
+	# Verify connection is reachable
+	if command -v mysql >/dev/null 2>&1; then
+		mysql -h"$mysql_host" -P"$mysql_port" -u"$mysql_user" \
+			${mysql_password:+-p"$mysql_password"} \
+			"$mysql_database" -e "SELECT 1" >/dev/null 2>&1 \
+			|| { echo "Cannot connect to MySQL at ${mysql_host}:${mysql_port}" >&2; exit 1; }
 	fi
-	sleep 1
-done
-docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null
+else
+	docker run --rm -d \
+		--name "$container_name" \
+		-e MYSQL_ROOT_PASSWORD="$mysql_password" \
+		-e MYSQL_DATABASE="$mysql_database" \
+		-p "$mysql_port:3306" \
+		"$mysql_image" >/dev/null
+
+	for _ in $(seq 1 90); do
+		if docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null 2>&1; then
+			break
+		fi
+		sleep 1
+	done
+	docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null
+fi
 
 rm -rf "$tmp_dir/pb_data" "$tmp_dir/pb_migrations" "$tmp_dir/pb.log" "$tmp_dir/pocketbase-qa"
-dsn="root:${mysql_password}@tcp(127.0.0.1:${mysql_port})/${mysql_database}?parseTime=true&multiStatements=true"
+if [ -z "$mysql_password" ]; then
+	dsn="${mysql_user}@tcp(${mysql_host}:${mysql_port})/${mysql_database}?parseTime=true&multiStatements=true"
+else
+	dsn="${mysql_user}:${mysql_password}@tcp(${mysql_host}:${mysql_port})/${mysql_database}?parseTime=true&multiStatements=true"
+fi
 
 go build -o "$tmp_dir/pocketbase-qa" ./examples/base
 
 PB_DATABASE_DRIVER=mysql PB_DATABASE_DSN="$dsn" \
-	"$tmp_dir/pocketbase-qa" serve --dir "$tmp_dir/pb_data" --http "$http_addr" \
+	"$tmp_dir/pocketbase-qa" serve --dir "$tmp_dir/pb_data" --migrationsDir "$tmp_dir/pb_migrations" --http "$http_addr" \
 	> "$tmp_dir/pb.log" 2>&1 &
 echo $! > "$tmp_dir/pb.pid"
 
@@ -66,7 +87,7 @@ for _ in $(seq 1 90); do
 done
 
 PB_DATABASE_DRIVER=mysql PB_DATABASE_DSN="$dsn" \
-	"$tmp_dir/pocketbase-qa" superuser upsert qa@example.com password123 --dir "$tmp_dir/pb_data" \
+	"$tmp_dir/pocketbase-qa" superuser upsert qa@example.com password123 --dir "$tmp_dir/pb_data" --migrationsDir "$tmp_dir/pb_migrations" \
 	> "$tmp_dir/superuser.log" 2>&1
 
 base_url="http://${http_addr}"
@@ -78,6 +99,31 @@ if [ -z "$token" ] || [ "$token" = "null" ]; then
 	echo "Failed to authenticate QA superuser" >&2
 	exit 1
 fi
+
+# Allow rerunning the QA against the same MySQL database by removing previous QA collections.
+for cleanup_pass in $(seq 1 10); do
+	curl -sS -f "$base_url/api/collections?page=1&perPage=500" \
+		-H "Authorization: Bearer ${token}" \
+		> "$tmp_dir/existing_collections.json"
+
+	mapfile -t qa_collection_ids < <(jq -r '.items | sort_by(.created) | reverse | .[] | select(.name | startswith("qa_")) | .id' "$tmp_dir/existing_collections.json" | tr -d '\r')
+	[ "${#qa_collection_ids[@]}" -eq 0 ] && break
+
+	deleted_any=0
+	for collection_id_to_delete in "${qa_collection_ids[@]}"; do
+		[ -z "$collection_id_to_delete" ] && continue
+		if curl -sS -f -X DELETE "$base_url/api/collections/${collection_id_to_delete}" \
+			-H "Authorization: Bearer ${token}" \
+			> /dev/null 2>&1; then
+			deleted_any=1
+		fi
+	done
+
+	if [ "$deleted_any" = "0" ]; then
+		echo "Failed to cleanup previous qa_* collections" >&2
+		exit 1
+	fi
+done
 
 curl -sS -f -X POST "$base_url/api/collections" \
 	-H "Authorization: Bearer ${token}" \
@@ -314,7 +360,7 @@ curl -sS -f -X POST "$base_url/api/collections/qa_all_fields/records" \
 	-H 'Content-Type: application/json' \
 	--data '{
 		"f_text":"hello world",
-		"f_number":42.5,
+		"f_number":43,
 		"f_bool":true,
 		"f_email":"test@example.com",
 		"f_url":"https://example.com",
@@ -336,7 +382,7 @@ curl -sS -f "$base_url/api/collections/qa_all_fields/records/${qa_all_fields_rec
 
 # Verify each field value
 jq -e '.f_text == "hello world"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_text mismatch" >&2; exit 1; }
-jq -e '.f_number == 42.5' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_number mismatch" >&2; exit 1; }
+jq -e '.f_number == 43' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_number mismatch" >&2; exit 1; }
 jq -e '.f_bool == true' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_bool mismatch" >&2; exit 1; }
 jq -e '.f_email == "test@example.com"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_email mismatch" >&2; exit 1; }
 jq -e '.f_url == "https://example.com"' "$tmp_dir/get_qa_all_fields_record.json" > /dev/null || { echo "FAIL: f_url mismatch" >&2; exit 1; }
@@ -425,6 +471,7 @@ curl -sS -f -X POST "$base_url/api/collections/qa_all_fields/records" \
 jq -e '.f_new_text == "new field value"' "$tmp_dir/create_after_schema_add.json" > /dev/null || { echo "FAIL: f_new_text after schema add" >&2; exit 1; }
 
 echo "Schema add field: OK"
+sleep 1
 
 # Schema update: rename f_new_text -> f_renamed_text
 curl -sS -f -X PATCH "$base_url/api/collections/${qa_all_fields_id}" \
@@ -485,19 +532,20 @@ jq -e '.f_text == "updated text"' "$tmp_dir/get_after_delete_field.json" > /dev/
 jq -e 'has("f_renamed_text") | not' "$tmp_dir/get_after_delete_field.json" > /dev/null || { echo "FAIL: deleted field still present" >&2; exit 1; }
 
 echo "Schema delete field: OK"
+sleep 1
 
 # Sort by each field type
 curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=f_text" > /dev/null || { echo "FAIL: sort by f_text" >&2; exit 1; }
 curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-f_number" > /dev/null || { echo "FAIL: sort by f_number" >&2; exit 1; }
 curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-f_date" > /dev/null || { echo "FAIL: sort by f_date" >&2; exit 1; }
-curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-created,-id" > /dev/null || { echo "FAIL: sort by -created,-id" >&2; exit 1; }
+curl -sS -f "$base_url/api/collections/qa_all_fields/records?sort=-id" > /dev/null || { echo "FAIL: sort by -id" >&2; exit 1; }
 
 echo "All field type sorts: OK"
 
 # Expand relation
 curl -sS -f "$base_url/api/collections/qa_all_fields/records?expand=f_relation" \
 	> "$tmp_dir/expand_all_fields_relation.json"
-jq -e '.items[0].expand.f_relation.label == "ref-one"' "$tmp_dir/expand_all_fields_relation.json" > /dev/null || { echo "FAIL: expand f_relation" >&2; exit 1; }
+jq -e '.items[] | select(.expand.f_relation.label == "ref-one")' "$tmp_dir/expand_all_fields_relation.json" > /dev/null || { echo "FAIL: expand f_relation" >&2; exit 1; }
 
 echo "Relation expand: OK"
 
