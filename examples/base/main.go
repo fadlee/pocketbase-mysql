@@ -169,7 +169,11 @@ func main() {
 	})
 
 	// GitHub selfupdate
-	ghupdate.MustRegister(app, app.RootCmd, ghupdate.Config{})
+	ghupdate.MustRegister(app, app.RootCmd, ghupdate.Config{
+		Owner:             "fadlee",
+		Repo:              "pocketbase-mysql",
+		ArchiveExecutable: "pocketbase-mysql",
+	})
 
 	// static route to serves files from the provided public dir
 	// (if publicDir exists and the route path is not already defined)

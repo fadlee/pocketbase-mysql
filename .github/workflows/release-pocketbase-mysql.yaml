@@ -107,9 +107,19 @@ jobs:
       - name: Package release asset
         shell: bash
         run: |
-          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_suffix }}"
-          mv "pocketbase-mysql${{ matrix.binary_suffix }}" "$asset_name"
-          echo "ASSET_NAME=$asset_name" >> "$GITHUB_ENV"
+          version="${GITHUB_REF_NAME#v}"
+          archive_name="pocketbase-mysql_${version}_${{ matrix.goos }}_${{ matrix.goarch }}.zip"
+          # rename binary to expected name (pocketbase-mysql or pocketbase-mysql.exe)
+          # then bundle into a zip alongside CHANGELOG.md and LICENSE.md if present
+          extra_files=()
+          [ -f CHANGELOG.md ] && extra_files+=(CHANGELOG.md)
+          [ -f LICENSE.md ] && extra_files+=(LICENSE.md)
+          if [ "${{ matrix.goos }}" = "windows" ]; then
+            7z a -tzip "$archive_name" "pocketbase-mysql${{ matrix.binary_suffix }}" "${extra_files[@]}"
+          else
+            zip -j "$archive_name" "pocketbase-mysql${{ matrix.binary_suffix }}" "${extra_files[@]}"
+          fi
+          echo "ASSET_NAME=$archive_name" >> "$GITHUB_ENV"
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
