@@ -64,7 +64,7 @@ jobs:
           GOARCH: ${{ matrix.goarch }}
         shell: bash
         run: |
-          VERSION=$(git describe --tags --always --dirty 2>/dev/null || echo "dev")
+          VERSION=$(git describe --tags --always 2>/dev/null || echo "dev")
           go build -ldflags "-X github.com/pocketbase/pocketbase.Version=${VERSION}" -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
 
       - name: Validate embedded UI (Unix)
