@@ -58,7 +58,7 @@ node scripts/export-mysql-patches.mjs <new-base-ref>
 
 ## MySQL QA Script
 
-`scripts/mysql-runtime-qa.mjs` (Node.js wrapper around `scripts/mysql_runtime_qa.py`) starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
+`scripts/mysql-runtime-qa.mjs` starts a disposable MySQL 8.4 container (or uses an existing server with `--skip-docker`), boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
 
 Requirements:
 
