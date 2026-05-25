@@ -2,6 +2,7 @@ package migrations
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/pocketbase/dbx"
@@ -12,6 +13,12 @@ import (
 // see https://github.com/pocketbase/pocketbase/issues/7689
 func init() {
 	core.SystemMigrations.Register(func(txApp core.App) error {
+		// This migration queries sqlite_master which does not exist in MySQL.
+		// MySQL indexes are already normalized at creation time by the fork DDL layer.
+		if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+			return nil
+		}
+
 		collections, err := txApp.FindAllCollections()
 		if err != nil {
 			return err

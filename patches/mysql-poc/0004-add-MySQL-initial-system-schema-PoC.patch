@@ -1,7 +1,7 @@
 From ded30a76b1a75978ca54715bcae9855992bbf2e5 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:51:45 +0700
-Subject: [PATCH 04/32] add MySQL initial system schema PoC
+Subject: [PATCH 04/35] add MySQL initial system schema PoC
 
 ---
  docs/mysql-gap-analysis.md    | 25 +++++++++++++++

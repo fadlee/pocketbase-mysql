@@ -1,7 +1,7 @@
 From e1c73a56ef5f676ac47416729f8b6242e51e2d55 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 00:03:17 +0700
-Subject: [PATCH 06/32] add MySQL text-backed field DDL PoC
+Subject: [PATCH 06/35] add MySQL text-backed field DDL PoC
 
 ---
  core/field_date.go         |  4 ++++

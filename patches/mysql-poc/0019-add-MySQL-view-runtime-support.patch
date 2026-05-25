@@ -1,7 +1,7 @@
 From 7c8a2e4b4f693c2a2d3e0fc63cd21b91739eb0f0 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 02:45:59 +0700
-Subject: [PATCH 19/32] add MySQL view runtime support
+Subject: [PATCH 19/35] add MySQL view runtime support
 
 ---
  core/collection_query.go        | 26 +++++++++++---

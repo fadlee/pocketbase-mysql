@@ -1,7 +1,7 @@
 From 7673e21ddb594da39c98a04c1a122538156da8de Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 05:52:57 +0700
-Subject: [PATCH 25/32] disable redundant basebuild triggers
+Subject: [PATCH 25/35] disable redundant basebuild triggers
 
 ---
  .github/workflows/release.yaml | 3 +--
