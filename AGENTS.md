@@ -66,3 +66,52 @@ node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-passwo
 3. `git push origin mysql/main && git push origin <tag>`
 4. `gh release create <tag> --repo fadlee/pocketbase-mysql --title "<tag>" --notes "..."`
 5. Workflows auto-trigger: `release-pocketbase-mysql` (zip binaries), `publish-ghcr` (Docker image)
+
+## Full Upstream Upgrade Flow
+
+End-to-end steps when a new upstream version (e.g. `v0.38.3`) is released:
+
+```sh
+# 1. Export current patch stack
+node scripts/export-mysql-patches.mjs v0.38.2
+
+# 2. Create branch from new upstream tag
+git fetch upstream
+git switch --create mysql/rebase-v0.38.3 v0.38.3
+
+# 3. Scan new migrations for SQLite-specific code
+git diff v0.38.2..v0.38.3 -- migrations/ | grep -i "sqlite\|pragma\|rowid"
+# Add MySQL early-return guards where needed
+
+# 4. Apply patch stack
+git am --3way patches/mysql-poc/*.patch
+# Conflict in ui/dist → skip (git am --skip), regenerate later
+# Conflict in Go/source → resolve manually, then git am --continue
+
+# 5. Fix & verify
+go mod tidy
+go build ./...
+go test ./...
+cd ui && npm run build && cd ..
+git add -A && git commit -m "Regenerate UI dist"
+
+# 6. Runtime QA
+# Reset the QA database first, then:
+node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-password "" --mysql-database pocketbase_qa
+
+# 7. Update docs (README, gap-analysis, upstream-workflow) — change baseline refs
+
+# 8. Export patch stack (once, as the very last step)
+node scripts/export-mysql-patches.mjs v0.38.3
+git add patches/mysql-poc/ && git commit -m "Refresh patch stack for v0.38.3"
+
+# 9. Merge to mysql/main, tag, release
+git switch mysql/main
+git reset --hard mysql/rebase-v0.38.3
+git tag -a v0.38.3-mysql.1 -m "PocketBase v0.38.3 MySQL fork release 1"
+git push --force-with-lease origin mysql/main
+git push origin v0.38.3-mysql.1
+gh release create v0.38.3-mysql.1 --repo fadlee/pocketbase-mysql --title "v0.38.3-mysql.1" --notes "..."
+```
+
+Key principle: one direction, tag only once at the end after CI is green.
