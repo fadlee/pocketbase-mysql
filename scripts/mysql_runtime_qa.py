@@ -1,0 +1,525 @@
+#!/usr/bin/env python3
+import argparse
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+from pathlib import Path
+
+
+def env_bool(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.lower() in {"1", "true", "yes", "on"}
+
+
+def env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None or raw == "":
+        return default
+    return int(raw)
+
+
+def http_json(method: str, url: str, token: str | None = None, payload=None):
+    headers = {}
+    data = None
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    if payload is not None:
+        headers["Content-Type"] = "application/json"
+        data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            body = resp.read().decode("utf-8")
+            return json.loads(body) if body else None
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} {method} {url}\n{body}") from exc
+
+
+def http_raw(method: str, url: str, token: str | None = None):
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(url, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req) as resp:
+            return resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"HTTP {exc.code} {method} {url}\n{body}") from exc
+
+
+class QA:
+    def __init__(self, args):
+        self.args = args
+        self.repo_root = Path(__file__).resolve().parents[1]
+        self.tmp_dir = Path(args.tmp_dir)
+        self.tmp_dir.mkdir(parents=True, exist_ok=True)
+        self.pb_data = self.tmp_dir / "pb_data"
+        self.pb_migrations = self.tmp_dir / "pb_migrations"
+        self.pb_log = self.tmp_dir / "pb.log"
+        self.binary = self.tmp_dir / ("pocketbase-qa.exe" if os.name == "nt" else "pocketbase-qa")
+        self.pb_proc = None
+        self.docker_started = False
+        self.base_url = f"http://{args.http_addr}"
+        self.token = None
+        self.collection_ids = {}
+
+    def log(self, msg: str):
+        print(msg, flush=True)
+
+    def assert_true(self, condition: bool, message: str):
+        if not condition:
+            raise RuntimeError(message)
+
+    def write_json(self, name: str, data):
+        (self.tmp_dir / name).write_text(json.dumps(data, indent=2), encoding="utf-8")
+
+    def cleanup(self):
+        if self.pb_proc and self.pb_proc.poll() is None:
+            self.pb_proc.terminate()
+            try:
+                self.pb_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.pb_proc.kill()
+        if self.docker_started:
+            subprocess.run(["docker", "rm", "-f", self.args.mysql_container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    def ensure_port_free(self):
+        host, port_raw = self.args.http_addr.rsplit(":", 1)
+        port = int(port_raw)
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            sock.settimeout(1)
+            if sock.connect_ex((host, port)) == 0:
+                raise RuntimeError(f"HTTP address {self.args.http_addr} is already in use.")
+
+    def mysql_dsn(self) -> str:
+        creds = self.args.mysql_user
+        if self.args.mysql_password != "":
+            creds += f":{self.args.mysql_password}"
+        return f"{creds}@tcp({self.args.mysql_host}:{self.args.mysql_port})/{self.args.mysql_database}?parseTime=true&multiStatements=true"
+
+    def maybe_start_docker(self):
+        if self.args.skip_docker:
+            self.log(f"Skipping Docker - using existing MySQL at {self.args.mysql_host}:{self.args.mysql_port}")
+            return
+        subprocess.run(["docker", "rm", "-f", self.args.mysql_container], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        cmd = [
+            "docker", "run", "--rm", "-d",
+            "--name", self.args.mysql_container,
+            "-e", f"MYSQL_ROOT_PASSWORD={self.args.mysql_password}",
+            "-e", f"MYSQL_DATABASE={self.args.mysql_database}",
+            "-p", f"{self.args.mysql_port}:3306",
+            self.args.mysql_image,
+        ]
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
+        self.docker_started = True
+        time.sleep(10)
+
+    def build_binary(self):
+        if self.binary.exists():
+            self.binary.unlink()
+        subprocess.run(["go", "build", "-o", str(self.binary), "./examples/base"], cwd=self.repo_root, check=True)
+
+    def mysql_env(self) -> dict:
+        """Return environment variables for MySQL database connection."""
+        env = dict(os.environ)
+        env["PB_DATABASE_DRIVER"] = "mysql"
+        env["PB_DATABASE_DSN"] = self.mysql_dsn()
+        return env
+
+    def start_server(self):
+        if self.pb_data.exists():
+            shutil.rmtree(self.pb_data)
+        if self.pb_migrations.exists():
+            shutil.rmtree(self.pb_migrations)
+        if self.pb_log.exists():
+            self.pb_log.unlink()
+        with self.pb_log.open("w", encoding="utf-8") as log_file:
+            self.pb_proc = subprocess.Popen(
+                [str(self.binary), "serve",
+                 "--dir", str(self.pb_data),
+                 "--migrationsDir", str(self.pb_migrations),
+                 "--http", self.args.http_addr],
+                cwd=self.repo_root,
+                env=self.mysql_env(),
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+            )
+        for _ in range(90):
+            if self.pb_log.exists() and "Server started" in self.pb_log.read_text(encoding="utf-8", errors="replace"):
+                return
+            if self.pb_proc.poll() is not None:
+                raise RuntimeError(self.pb_log.read_text(encoding="utf-8", errors="replace"))
+            time.sleep(1)
+        raise RuntimeError("Server did not start in time")
+
+    def create_superuser_and_auth(self):
+        subprocess.run(
+            [str(self.binary), "superuser", "upsert", "qa@example.com", "password123",
+             "--dir", str(self.pb_data),
+             "--migrationsDir", str(self.pb_migrations)],
+            cwd=self.repo_root,
+            env=self.mysql_env(),
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        auth = http_json("POST", f"{self.base_url}/api/collections/_superusers/auth-with-password", payload={"identity": "qa@example.com", "password": "password123"})
+        token = auth.get("token")
+        self.assert_true(bool(token), "Failed to authenticate QA superuser")
+        self.token = token
+
+    def cleanup_qa_collections(self):
+        for _ in range(10):
+            result = http_json("GET", f"{self.base_url}/api/collections?page=1&perPage=500", token=self.token)
+            items = result.get("items", [])
+            qa_items = [item for item in items if item.get("name", "").startswith("qa_")]
+            if not qa_items:
+                return
+            qa_items.sort(key=lambda item: item.get("created", ""), reverse=True)
+            deleted_any = False
+            for item in qa_items:
+                try:
+                    http_raw("DELETE", f"{self.base_url}/api/collections/{item['id']}", token=self.token)
+                    deleted_any = True
+                except RuntimeError:
+                    pass
+            self.assert_true(deleted_any, "Failed to cleanup previous qa_* collections")
+
+    def create_collection(self, payload, out_name: str):
+        data = http_json("POST", f"{self.base_url}/api/collections", token=self.token, payload=payload)
+        self.write_json(out_name, data)
+        self.collection_ids[payload["name"]] = data["id"]
+        return data
+
+    def patch_collection(self, collection_id: str, payload, out_name: str):
+        data = http_json("PATCH", f"{self.base_url}/api/collections/{collection_id}", token=self.token, payload=payload)
+        self.write_json(out_name, data)
+        return data
+
+    def create_record(self, collection_name: str, payload, out_name: str):
+        data = http_json("POST", f"{self.base_url}/api/collections/{collection_name}/records", payload=payload)
+        self.write_json(out_name, data)
+        return data
+
+    def get_records(self, collection_name: str, query: str = "", token: bool = False, out_name: str | None = None):
+        url = f"{self.base_url}/api/collections/{collection_name}/records"
+        if query:
+            url += f"?{query}"
+        data = http_json("GET", url, token=self.token if token else None)
+        if out_name:
+            self.write_json(out_name, data)
+        return data
+
+    def get_record(self, collection_name: str, record_id: str, query: str = "", out_name: str | None = None):
+        url = f"{self.base_url}/api/collections/{collection_name}/records/{record_id}"
+        if query:
+            url += f"?{query}"
+        data = http_json("GET", url)
+        if out_name:
+            self.write_json(out_name, data)
+        return data
+
+    def update_record(self, collection_name: str, record_id: str, payload, out_name: str):
+        data = http_json("PATCH", f"{self.base_url}/api/collections/{collection_name}/records/{record_id}", payload=payload)
+        self.write_json(out_name, data)
+        return data
+
+    def section_basic_runtime(self):
+        runtime = self.create_collection({
+            "name": "qa_runtime",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [
+                {"name": "title", "type": "text", "required": True, "max": 255},
+                {"name": "published", "type": "bool"},
+            ],
+            "indexes": ["CREATE INDEX idx_qa_runtime_title ON qa_runtime (title)"],
+        }, "create_collection.json")
+        self.create_record("qa_runtime", {"title": "hello mysql runtime", "published": True}, "create_record.json")
+        self.get_records("qa_runtime", "sort=title", out_name="list_records.json")
+        self.get_records("qa_runtime", "filter=title~%22runtime%22", out_name="filter_records.json")
+        add_select = dict(fields=runtime["fields"] + [{"name": "status", "type": "select", "required": False, "values": ["draft", "published"], "maxSelect": 1}])
+        self.patch_collection(runtime["id"], add_select, "update_collection_add_select.json")
+        self.create_record("qa_runtime", {"title": "schema updated", "published": False, "status": "draft"}, "create_record_after_schema_update.json")
+        self.get_records("qa_runtime", "filter=status=%22draft%22", out_name="filter_select_records.json")
+
+    def section_select_and_matrix(self):
+        self.create_collection({
+            "name": "qa_multi_select",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [
+                {"name": "title", "type": "text", "required": True, "max": 255},
+                {"name": "tags", "type": "select", "required": False, "values": ["alpha", "beta", "gamma"], "maxSelect": 3},
+            ],
+        }, "create_multi_select_collection.json")
+        self.create_record("qa_multi_select", {"title": "multi select", "tags": ["alpha", "beta"]}, "create_multi_select_record.json")
+        self.get_records("qa_multi_select", "filter=tags~%22alpha%22", out_name="filter_multi_select_records.json")
+
+        matrix = self.create_collection({
+            "name": "qa_matrix",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [
+                {"name": "title", "type": "text", "required": True, "max": 255},
+                {"name": "status", "type": "select", "required": False, "values": ["draft", "published"], "maxSelect": 1},
+            ],
+        }, "create_matrix_collection.json")
+        self.create_record("qa_matrix", {"title": "before matrix", "status": "draft"}, "create_matrix_record.json")
+        fields = matrix["fields"]
+        for field in fields:
+            if field["name"] == "status":
+                field["name"] = "state"
+        renamed = self.patch_collection(matrix["id"], {"fields": fields}, "matrix_rename_result.json")
+        time.sleep(1)
+        fields = [field for field in renamed["fields"] if field["name"] != "title"]
+        deleted = self.patch_collection(matrix["id"], {"fields": fields}, "matrix_delete_result.json")
+        time.sleep(1)
+        for field in deleted["fields"]:
+            if field["name"] == "state":
+                field["maxSelect"] = 3
+                field["values"] = ["draft", "published", "archived"]
+        multi = self.patch_collection(matrix["id"], {"fields": deleted["fields"]}, "matrix_single_to_multi_result.json")
+        time.sleep(1)
+        self.create_record("qa_matrix", {"state": ["draft", "published"]}, "create_matrix_multi_record.json")
+        self.get_records("qa_matrix", "filter=state~%22draft%22", out_name="filter_matrix_multi_records.json")
+        for field in multi["fields"]:
+            if field["name"] == "state":
+                field["maxSelect"] = 1
+        self.patch_collection(matrix["id"], {"fields": multi["fields"]}, "matrix_multi_to_single_result.json")
+        self.get_records("qa_matrix", "filter=state=%22published%22", out_name="filter_matrix_single_records.json")
+
+    def section_relations_and_view(self):
+        authors = self.create_collection({
+            "name": "qa_authors",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [{"name": "name", "type": "text", "required": True, "max": 255}],
+        }, "create_authors_collection.json")
+        self.create_collection({
+            "name": "qa_books",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [
+                {"name": "title", "type": "text", "required": True, "max": 255},
+                {"name": "authors", "type": "relation", "required": False, "collectionId": authors["id"], "maxSelect": 3},
+            ],
+        }, "create_books_collection.json")
+        author_one = self.create_record("qa_authors", {"name": "Author One"}, "create_author_one.json")
+        author_two = self.create_record("qa_authors", {"name": "Author Two"}, "create_author_two.json")
+        self.create_record("qa_books", {"title": "Book One", "authors": [author_one["id"], author_two["id"]]}, "create_book_one.json")
+        self.get_records("qa_authors", "filter=qa_books_via_authors.title~%22Book%22", out_name="filter_back_relation_records.json")
+        self.get_records("qa_books", "filter=authors.name~%22Author%22", out_name="filter_forward_relation_records.json")
+        self.get_records("qa_books", "expand=authors", out_name="expand_relation_records.json")
+        self.create_collection({
+            "name": "qa_books_view",
+            "type": "view",
+            "viewQuery": "SELECT id, title FROM qa_books",
+        }, "create_books_view_collection.json")
+        self.get_records("qa_books_view", token=True, out_name="list_books_view_records.json")
+        self.get_records("qa_books_view", "filter=title~%22Book%22", token=True, out_name="filter_books_view_records.json")
+        self.create_record("qa_books", {"title": "Book Two"}, "create_book_two.json")
+        self.get_records("qa_books_view", "sort=title", token=True, out_name="list_books_view_after_update.json")
+
+    def section_all_fields(self):
+        self.log("Testing all field types...")
+        ref = self.create_collection({
+            "name": "qa_ref",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [{"name": "label", "type": "text", "required": True}],
+        }, "create_qa_ref.json")
+        ref_record = self.create_record("qa_ref", {"label": "ref-one"}, "create_qa_ref_record.json")
+        all_fields = self.create_collection({
+            "name": "qa_all_fields",
+            "type": "base",
+            "listRule": "",
+            "viewRule": "",
+            "createRule": "",
+            "updateRule": "",
+            "deleteRule": "",
+            "fields": [
+                {"name": "f_text", "type": "text", "required": False, "max": 500},
+                {"name": "f_number", "type": "number", "required": False},
+                {"name": "f_bool", "type": "bool", "required": False},
+                {"name": "f_email", "type": "email", "required": False},
+                {"name": "f_url", "type": "url", "required": False},
+                {"name": "f_date", "type": "date", "required": False},
+                {"name": "f_select_single", "type": "select", "required": False, "values": ["a", "b", "c"], "maxSelect": 1},
+                {"name": "f_select_multi", "type": "select", "required": False, "values": ["x", "y", "z"], "maxSelect": 3},
+                {"name": "f_json", "type": "json", "required": False},
+                {"name": "f_editor", "type": "editor", "required": False},
+                {"name": "f_relation", "type": "relation", "required": False, "collectionId": ref["id"], "maxSelect": 1},
+                {"name": "f_relation_multi", "type": "relation", "required": False, "collectionId": ref["id"], "maxSelect": 5},
+            ],
+        }, "create_qa_all_fields.json")
+        record = self.create_record("qa_all_fields", {
+            "f_text": "hello world",
+            "f_number": 43,
+            "f_bool": True,
+            "f_email": "test@example.com",
+            "f_url": "https://example.com",
+            "f_date": "2026-01-15 10:00:00.000Z",
+            "f_select_single": "a",
+            "f_select_multi": ["x", "y"],
+            "f_json": {"key": "value", "num": 123},
+            "f_editor": "<p>rich text</p>",
+            "f_relation": ref_record["id"],
+            "f_relation_multi": [ref_record["id"]],
+        }, "create_qa_all_fields_record.json")
+        fetched = self.get_record("qa_all_fields", record["id"], out_name="get_qa_all_fields_record.json")
+        self.assert_true(fetched["f_text"] == "hello world", "FAIL: f_text mismatch")
+        self.assert_true(fetched["f_number"] == 43, "FAIL: f_number mismatch")
+        self.assert_true(fetched["f_bool"] is True, "FAIL: f_bool mismatch")
+        self.assert_true(fetched["f_email"] == "test@example.com", "FAIL: f_email mismatch")
+        self.assert_true(fetched["f_url"] == "https://example.com", "FAIL: f_url mismatch")
+        self.assert_true(fetched["f_select_single"] == "a", "FAIL: f_select_single mismatch")
+        self.assert_true(len(fetched["f_select_multi"]) == 2, "FAIL: f_select_multi mismatch")
+        self.assert_true(fetched["f_editor"] == "<p>rich text</p>", "FAIL: f_editor mismatch")
+        self.assert_true(fetched["f_relation"] == ref_record["id"], "FAIL: f_relation mismatch")
+        self.assert_true(len(fetched["f_relation_multi"]) == 1, "FAIL: f_relation_multi mismatch")
+        self.log("All field type create/read: OK")
+
+        updated = self.update_record("qa_all_fields", record["id"], {
+            "f_text": "updated text",
+            "f_number": 99,
+            "f_bool": False,
+            "f_select_single": "b",
+            "f_select_multi": ["z"],
+        }, "update_qa_all_fields_record.json")
+        self.assert_true(updated["f_text"] == "updated text", "FAIL: f_text update mismatch")
+        self.assert_true(updated["f_number"] == 99, "FAIL: f_number update mismatch")
+        self.assert_true(updated["f_bool"] is False, "FAIL: f_bool update mismatch")
+        self.assert_true(updated["f_select_single"] == "b", "FAIL: f_select_single update mismatch")
+        self.assert_true(updated["f_select_multi"] == ["z"], "FAIL: f_select_multi update mismatch")
+        self.log("All field type update: OK")
+
+        self.assert_true(len(self.get_records("qa_all_fields", "filter=f_text~%22updated%22", out_name="filter_by_text.json")["items"]) >= 1, "FAIL: filter by f_text")
+        self.assert_true(len(self.get_records("qa_all_fields", "filter=f_number%3E50", out_name="filter_by_number.json")["items"]) >= 1, "FAIL: filter by f_number")
+        self.assert_true(len(self.get_records("qa_all_fields", "filter=f_bool%3Dfalse", out_name="filter_by_bool.json")["items"]) >= 1, "FAIL: filter by f_bool")
+        self.assert_true(len(self.get_records("qa_all_fields", "filter=f_email~%22example%22", out_name="filter_by_email.json")["items"]) >= 1, "FAIL: filter by f_email")
+        self.assert_true(len(self.get_records("qa_all_fields", "filter=f_select_single%3D%22b%22", out_name="filter_by_select.json")["items"]) >= 1, "FAIL: filter by f_select_single")
+        relation_query = urllib.parse.quote(f'f_relation="{ref_record["id"]}"', safe="")
+        self.assert_true(len(self.get_records("qa_all_fields", f"filter={relation_query}", out_name="filter_by_relation.json")["items"]) >= 1, "FAIL: filter by f_relation")
+        self.log("All field type filters: OK")
+
+        add_fields = all_fields["fields"] + [{"name": "f_new_text", "type": "text", "required": False, "max": 100}]
+        self.patch_collection(all_fields["id"], {"fields": add_fields}, "schema_add_field.json")
+        after_add = self.create_record("qa_all_fields", {"f_text": "after schema add", "f_new_text": "new field value"}, "create_after_schema_add.json")
+        self.assert_true(after_add["f_new_text"] == "new field value", "FAIL: f_new_text after schema add")
+        self.log("Schema add field: OK")
+        time.sleep(1)
+
+        renamed_fields = json.loads(json.dumps(add_fields))
+        for field in renamed_fields:
+            if field["name"] == "f_new_text":
+                field["name"] = "f_renamed_text"
+        self.patch_collection(all_fields["id"], {"fields": renamed_fields}, "schema_rename_field.json")
+        time.sleep(1)
+        after_rename = self.get_record("qa_all_fields", record["id"], out_name="get_after_rename.json")
+        self.assert_true(after_rename["f_text"] == "updated text", "FAIL: existing record unreadable after rename")
+        self.log("Schema rename field: OK")
+
+        deleted_fields = [field for field in renamed_fields if field["name"] != "f_renamed_text"]
+        self.patch_collection(all_fields["id"], {"fields": deleted_fields}, "schema_delete_field.json")
+        time.sleep(1)
+        after_delete = self.get_record("qa_all_fields", record["id"], out_name="get_after_delete_field.json")
+        self.assert_true(after_delete["f_text"] == "updated text", "FAIL: existing record unreadable after field delete")
+        self.assert_true("f_renamed_text" not in after_delete, "FAIL: deleted field still present")
+        self.log("Schema delete field: OK")
+        time.sleep(1)
+
+        self.get_records("qa_all_fields", "sort=f_text")
+        self.get_records("qa_all_fields", "sort=-f_number")
+        self.get_records("qa_all_fields", "sort=-f_date")
+        self.get_records("qa_all_fields", "sort=-id")
+        self.log("All field type sorts: OK")
+
+        expanded = self.get_records("qa_all_fields", "expand=f_relation", out_name="expand_all_fields_relation.json")
+        self.assert_true(any(item.get("expand", {}).get("f_relation", {}).get("label") == "ref-one" for item in expanded["items"]), "FAIL: expand f_relation")
+        self.log("Relation expand: OK")
+        self.log("All field types QA: PASSED")
+
+    def run(self):
+        self.ensure_port_free()
+        self.maybe_start_docker()
+        self.build_binary()
+        self.start_server()
+        self.create_superuser_and_auth()
+        self.cleanup_qa_collections()
+        self.section_basic_runtime()
+        self.section_select_and_matrix()
+        self.section_relations_and_view()
+        self.section_all_fields()
+        log_text = self.pb_log.read_text(encoding="utf-8", errors="replace")
+        if "ERROR" in log_text:
+            raise RuntimeError(f"Runtime QA completed but server log contains ERROR entries:\n{log_text}")
+        self.log(f"MySQL runtime QA passed. Logs: {self.pb_log}")
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run PocketBase MySQL runtime QA")
+    parser.add_argument("--skip-docker", action="store_true", default=env_bool("MYSQL_QA_SKIP_DOCKER", False))
+    parser.add_argument("--mysql-container", default=os.getenv("MYSQL_QA_CONTAINER", "pb-mysql-runtime-qa"))
+    parser.add_argument("--mysql-host", default=os.getenv("MYSQL_QA_HOST", "127.0.0.1"))
+    parser.add_argument("--mysql-port", type=int, default=env_int("MYSQL_QA_MYSQL_PORT", 3307))
+    parser.add_argument("--mysql-user", default=os.getenv("MYSQL_QA_USER", "root"))
+    parser.add_argument("--mysql-password", default=os.getenv("MYSQL_QA_PASSWORD", "pbpass"))
+    parser.add_argument("--mysql-database", default=os.getenv("MYSQL_QA_DATABASE", "pocketbase_qa"))
+    parser.add_argument("--mysql-image", default=os.getenv("MYSQL_QA_IMAGE", "mysql:8.4"))
+    parser.add_argument("--http-addr", default=os.getenv("MYSQL_QA_HTTP_ADDR", "127.0.0.1:18090"))
+    parser.add_argument("--tmp-dir", default=os.getenv("MYSQL_QA_TMP_DIR", os.path.join(tempfile.gettempdir(), "pb-mysql-runtime-qa")))
+    return parser.parse_args()
+
+
+def main():
+    args = parse_args()
+    qa = QA(args)
+    try:
+        qa.run()
+    finally:
+        qa.cleanup()
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception as exc:
+        print(str(exc), file=sys.stderr)
+        sys.exit(1)

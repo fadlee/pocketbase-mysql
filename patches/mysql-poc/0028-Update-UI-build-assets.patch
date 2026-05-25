@@ -1,7 +1,7 @@
 From 081aa8b67bb8a46e3ed5f1ea224bd311240a2662 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Tue, 19 May 2026 20:23:02 +0700
-Subject: [PATCH 28/32] Update UI build assets
+Subject: [PATCH 28/35] Update UI build assets
 
 ---
  ui/dist/assets/index-B_P0F7h3.js | 6 +++---

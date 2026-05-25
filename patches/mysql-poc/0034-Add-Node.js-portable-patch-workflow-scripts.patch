@@ -1,0 +1,259 @@
+From 034c6d5fd2f0bed5530c188beb5602daf922d4cc Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 21:31:08 +0700
+Subject: [PATCH 34/35] Add Node.js portable patch workflow scripts
+
+---
+ scripts/apply-mysql-patches.mjs  | 90 ++++++++++++++++++++++++++++++++
+ scripts/export-mysql-patches.mjs | 67 ++++++++++++++++++++++++
+ scripts/mysql-runtime-qa.mjs     | 67 ++++++++++++++++++++++++
+ 3 files changed, 224 insertions(+)
+ create mode 100644 scripts/apply-mysql-patches.mjs
+ create mode 100644 scripts/export-mysql-patches.mjs
+ create mode 100644 scripts/mysql-runtime-qa.mjs
+
+diff --git a/scripts/apply-mysql-patches.mjs b/scripts/apply-mysql-patches.mjs
+new file mode 100644
+index 00000000..290a974c
+--- /dev/null
++++ b/scripts/apply-mysql-patches.mjs
+@@ -0,0 +1,90 @@
++#!/usr/bin/env node
++/**
++ * Apply the MySQL patch stack onto the current branch using git am.
++ *
++ * Usage:
++ *   node scripts/apply-mysql-patches.mjs [patch-dir]
++ *
++ * Default patch-dir: patches/mysql-poc (or MYSQL_PATCH_DIR env)
++ *
++ * Options:
++ *   --3way       Use 3-way merge (default: enabled)
++ *   --no-3way    Disable 3-way merge
++ *   --continue   Resume after resolving a conflict
++ *   --abort      Abort the current git am session
++ *   --skip       Skip the current patch
++ */
++
++import { execSync, spawnSync } from "node:child_process";
++import { readdirSync } from "node:fs";
++import { resolve } from "node:path";
++
++const args = process.argv.slice(2);
++const flags = args.filter((a) => a.startsWith("--"));
++const positional = args.filter((a) => !a.startsWith("--"));
++
++// Handle --continue, --abort, --skip
++if (flags.includes("--continue")) {
++  run("git am --continue");
++  process.exit(0);
++}
++if (flags.includes("--abort")) {
++  run("git am --abort");
++  console.log("Aborted git am session.");
++  process.exit(0);
++}
++if (flags.includes("--skip")) {
++  run("git am --skip");
++  process.exit(0);
++}
++
++// Refuse to apply on dirty worktree (match bash behavior)
++const status = execSync("git status --porcelain", { encoding: "utf8" }).trim();
++if (status) {
++  console.error("Refusing to apply patches on a dirty worktree.");
++  process.exit(1);
++}
++
++const patchDir = resolve(
++  positional[0] || process.env.MYSQL_PATCH_DIR || "patches/mysql-poc"
++);
++
++// Collect .patch files sorted by name
++const patches = readdirSync(patchDir)
++  .filter((f) => f.endsWith(".patch"))
++  .sort()
++  .map((f) => resolve(patchDir, f));
++
++if (patches.length === 0) {
++  console.error(`No .patch files found in ${patchDir}`);
++  process.exit(1);
++}
++
++console.log(`Applying ${patches.length} patch(es) from ${patchDir}...`);
++
++const useThreeWay = !flags.includes("--no-3way");
++const amArgs = ["am", ...(useThreeWay ? ["--3way"] : []), ...patches];
++
++const result = spawnSync("git", amArgs, {
++  stdio: "inherit",
++  encoding: "utf8",
++});
++
++if (result.status === 0) {
++  console.log(`\nAll ${patches.length} patches applied successfully.`);
++} else {
++  console.error(
++    `\ngit am stopped. Resolve conflicts then run:\n` +
++      `  node scripts/apply-mysql-patches.mjs --continue\n` +
++      `\nOr skip this patch:\n` +
++      `  node scripts/apply-mysql-patches.mjs --skip\n` +
++      `\nOr abort:\n` +
++      `  node scripts/apply-mysql-patches.mjs --abort`
++  );
++  process.exit(result.status ?? 1);
++}
++
++function run(cmd) {
++  const r = spawnSync(cmd, { shell: true, stdio: "inherit" });
++  if (r.status !== 0) process.exit(r.status ?? 1);
++}
+diff --git a/scripts/export-mysql-patches.mjs b/scripts/export-mysql-patches.mjs
+new file mode 100644
+index 00000000..a0e6588b
+--- /dev/null
++++ b/scripts/export-mysql-patches.mjs
+@@ -0,0 +1,67 @@
++#!/usr/bin/env node
++/**
++ * Export the MySQL patch stack as individual .patch files.
++ *
++ * Usage:
++ *   node scripts/export-mysql-patches.mjs <base-ref>
++ *
++ * Example:
++ *   node scripts/export-mysql-patches.mjs v0.38.2
++ *
++ * Environment variables:
++ *   MYSQL_PATCH_DIR  - output directory (default: patches/mysql-poc)
++ */
++
++import { execSync } from "node:child_process";
++import { mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
++import { resolve } from "node:path";
++
++const baseRef = process.argv[2];
++if (!baseRef) {
++  console.error("Usage: node scripts/export-mysql-patches.mjs <base-ref>");
++  process.exit(1);
++}
++
++const outDir = resolve(process.env.MYSQL_PATCH_DIR || "patches/mysql-poc");
++
++// Resolve refs for README metadata
++const baseHash = git(`rev-parse --short ${baseRef}`);
++const headHash = git("rev-parse --short HEAD");
++const headRef = git("rev-parse --abbrev-ref HEAD");
++
++// Clean previous patches (keep directory)
++mkdirSync(outDir, { recursive: true });
++for (const f of readdirSync(outDir)) {
++  if (f.endsWith(".patch")) rmSync(resolve(outDir, f));
++}
++
++// Generate patches
++console.log(`Exporting patches: ${baseRef}..HEAD`);
++const patchOutput = git(
++  `format-patch --output-directory "${outDir}" ${baseRef}..HEAD`
++);
++const patches = patchOutput.split("\n").filter(Boolean);
++console.log(`Exported ${patches.length} patch(es) to ${outDir}`);
++
++// Write README
++const readme = `# MySQL PoC Patch Stack
++
++Generated from:
++
++- Base ref: \`${baseRef}\` (${baseHash})
++- Head ref: \`${headRef}\` (${headHash})
++- Date: ${new Date().toISOString().slice(0, 10)}
++
++Apply to a clean upstream worktree with:
++
++\`\`\`sh
++node scripts/apply-mysql-patches.mjs patches/mysql-poc
++\`\`\`
++`;
++
++writeFileSync(resolve(outDir, "README.md"), readme);
++console.log("Updated patches/mysql-poc/README.md");
++
++function git(args) {
++  return execSync(`git ${args}`, { encoding: "utf8" }).trim();
++}
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+new file mode 100644
+index 00000000..c10c4f74
+--- /dev/null
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -0,0 +1,67 @@
++#!/usr/bin/env node
++/**
++ * MySQL runtime QA - Node.js wrapper.
++ *
++ * Delegates to the Python implementation (scripts/mysql_runtime_qa.py) which
++ * handles the full QA suite including Docker lifecycle, PocketBase build,
++ * server management, and API verification.
++ *
++ * Usage:
++ *   node scripts/mysql-runtime-qa.mjs [options]
++ *
++ * All arguments and environment variables are forwarded to the Python script.
++ *
++ * Options (forwarded):
++ *   --skip-docker         Use existing MySQL instead of starting Docker
++ *   --mysql-host HOST     MySQL host (default: 127.0.0.1)
++ *   --mysql-port PORT     MySQL port (default: 3307)
++ *   --mysql-user USER     MySQL user (default: root)
++ *   --mysql-password PW   MySQL password (default: pbpass)
++ *   --mysql-database DB   MySQL database (default: pocketbase_qa)
++ *   --mysql-image IMG     Docker image (default: mysql:8.4)
++ *   --http-addr ADDR      PocketBase HTTP address (default: 127.0.0.1:18090)
++ *   --tmp-dir DIR         Temp directory for QA artifacts
++ */
++
++import { spawnSync } from "node:child_process";
++import { existsSync } from "node:fs";
++import { resolve, dirname } from "node:path";
++import { fileURLToPath } from "node:url";
++
++const __dirname = dirname(fileURLToPath(import.meta.url));
++const scriptPath = resolve(__dirname, "mysql_runtime_qa.py");
++
++if (!existsSync(scriptPath)) {
++  console.error(`Python QA script not found: ${scriptPath}`);
++  console.error("Make sure scripts/mysql_runtime_qa.py exists on this branch.");
++  process.exit(1);
++}
++
++// Detect python executable
++const pythonCandidates = ["python3", "python"];
++let pythonBin = null;
++
++for (const candidate of pythonCandidates) {
++  const check = spawnSync(candidate, ["--version"], {
++    encoding: "utf8",
++    stdio: "pipe",
++  });
++  if (check.status === 0) {
++    pythonBin = candidate;
++    break;
++  }
++}
++
++if (!pythonBin) {
++  console.error("Python 3 is required but not found in PATH.");
++  process.exit(1);
++}
++
++// Forward all CLI args to the Python script
++const forwardedArgs = process.argv.slice(2);
++const result = spawnSync(pythonBin, [scriptPath, ...forwardedArgs], {
++  stdio: "inherit",
++  env: process.env,
++});
++
++process.exit(result.status ?? 1);
+-- 
+2.54.0.windows.1
+
