@@ -179,7 +179,7 @@ function recordsPickerModal(settings = defaultSettings) {
                 requestKey: RECORDS_REQUEST_KEY,
                 filter: normalizedFilter,
                 skipTotal: 1,
-                sort: data.collection.type != "view" ? "-@rowid" : "",
+                sort: data.collection.type != "view" ? "-created,-id" : "",
             });
 
             data.lastRecordsPage = result.page;
