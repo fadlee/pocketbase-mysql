@@ -54,8 +54,13 @@ jobs:
       - name: Package release asset
         shell: bash
         run: |
-          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_suffix }}"
-          mv "pocketbase-mysql${{ matrix.binary_suffix }}" "$asset_name"
+          binary_name="pocketbase-mysql${{ matrix.binary_suffix }}"
+          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}.zip"
+          if command -v zip &>/dev/null; then
+            zip "$asset_name" "$binary_name"
+          else
+            7z a "$asset_name" "$binary_name"
+          fi
           echo "ASSET_NAME=$asset_name" >> "$GITHUB_ENV"
 
       - name: Upload release asset
