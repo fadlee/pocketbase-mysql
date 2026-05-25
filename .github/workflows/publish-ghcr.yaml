@@ -2,8 +2,6 @@ name: publish-ghcr
 
 on:
   push:
-    branches:
-      - mysql/main
     tags:
       - 'v*'
   workflow_dispatch:
