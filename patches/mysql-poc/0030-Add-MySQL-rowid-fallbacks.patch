@@ -1,0 +1,104 @@
+From e761efccc806139250e3fc50d76bd6be9c7226e1 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 21:11:13 +0700
+Subject: [PATCH 30/32] Add MySQL rowid fallbacks
+
+---
+ tools/search/sort.go                    | 10 ++++++++++
+ ui/src/apiPreview/docsList.js           |  8 ++++++++
+ ui/src/records/recordFilePickerModal.js |  2 +-
+ ui/src/records/recordsList.js           |  4 ++--
+ ui/src/records/recordsPickerModal.js    |  2 +-
+ 5 files changed, 22 insertions(+), 4 deletions(-)
+
+diff --git a/tools/search/sort.go b/tools/search/sort.go
+index bd600d13..4ddd0dce 100644
+--- a/tools/search/sort.go
++++ b/tools/search/sort.go
+@@ -2,6 +2,7 @@ package search
+ 
+ import (
+ 	"fmt"
++	"os"
+ 	"strings"
+ )
+ 
+@@ -31,6 +32,15 @@ func (s *SortField) BuildExpr(fieldResolver FieldResolver) (string, error) {
+ 
+ 	// special case for the builtin SQLite rowid column
+ 	if s.Name == rowidSortKey {
++		if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++			result, err := fieldResolver.Resolve("id")
++			if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
++				return "", fmt.Errorf("invalid sort field %q", s.Name)
++			}
++
++			return fmt.Sprintf("%s %s", result.Identifier, s.Direction), nil
++		}
++
+ 		return fmt.Sprintf("[[_rowid_]] %s", s.Direction), nil
+ 	}
+ 
+diff --git a/ui/src/apiPreview/docsList.js b/ui/src/apiPreview/docsList.js
+index 31a0491a..395ce005 100644
+--- a/ui/src/apiPreview/docsList.js
++++ b/ui/src/apiPreview/docsList.js
+@@ -211,6 +211,14 @@ export function docsList(collection) {
+                             t.code({ hidden: () => collection.type == "view" }, "@rowid"),
+                             ".",
+                         ),
++                        t.p(
++                            { hidden: () => collection.type == "view" },
++                            "Note: ",
++                            t.code(null, "@rowid"),
++                            " is SQLite-specific. MySQL-backed apps should use portable fields like ",
++                            t.code(null, "-created,-id"),
++                            ".",
++                        ),
+                     ),
+                 ),
+                 t.tr(
+diff --git a/ui/src/records/recordFilePickerModal.js b/ui/src/records/recordFilePickerModal.js
+index 2e9269c8..bd070fdc 100644
+--- a/ui/src/records/recordFilePickerModal.js
++++ b/ui/src/records/recordFilePickerModal.js
+@@ -143,7 +143,7 @@ function recordFilePickerModal(settings = defaultSettings) {
+                 requestKey: RECORDS_REQUEST_KEY,
+                 filter: normalizedFilter,
+                 skipTotal: 1,
+-                sort: data.activeCollection.type != "view" ? "-@rowid" : "",
++                sort: data.activeCollection.type != "view" ? "-created,-id" : "",
+             });
+ 
+             data.lastRecordsPage = result.page;
+diff --git a/ui/src/records/recordsList.js b/ui/src/records/recordsList.js
+index abf6aaf4..afd71caf 100644
+--- a/ui/src/records/recordsList.js
++++ b/ui/src/records/recordsList.js
+@@ -116,8 +116,8 @@ window.app.components.recordsList = function(propsArg = {}) {
+                 ? props.collection.fields.find((f) => !f.hidden && f.name === sortMatch[2])
+                 : null;
+             if (!sortField) {
+-                // default fallback to -@rowid when available
+-                normalizedSort = props.collection.type != "view" ? "-@rowid" : undefined;
++                // Prefer a portable fallback so record listing works with both SQLite and MySQL.
++                normalizedSort = props.collection.type != "view" ? "-created,-id" : undefined;
+             } else if (sortField?.type == "relation") {
+                 normalizedSort = app.store.collections
+                     ?.find((c) => c.id == sortField.collectionId)
+diff --git a/ui/src/records/recordsPickerModal.js b/ui/src/records/recordsPickerModal.js
+index 6db2667d..dca49067 100644
+--- a/ui/src/records/recordsPickerModal.js
++++ b/ui/src/records/recordsPickerModal.js
+@@ -179,7 +179,7 @@ function recordsPickerModal(settings = defaultSettings) {
+                 requestKey: RECORDS_REQUEST_KEY,
+                 filter: normalizedFilter,
+                 skipTotal: 1,
+-                sort: data.collection.type != "view" ? "-@rowid" : "",
++                sort: data.collection.type != "view" ? "-created,-id" : "",
+             });
+ 
+             data.lastRecordsPage = result.page;
+-- 
+2.54.0.windows.1
+

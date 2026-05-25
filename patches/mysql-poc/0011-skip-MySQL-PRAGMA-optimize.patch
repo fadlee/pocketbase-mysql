@@ -1,0 +1,77 @@
+From a65e0bcb2192d739ed947608acc01f66ac178eb8 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 00:46:14 +0700
+Subject: [PATCH 11/32] skip MySQL PRAGMA optimize
+
+---
+ core/base.go                         |  8 +++++---
+ core/collection_record_table_sync.go | 12 +++++++-----
+ docs/mysql-gap-analysis.md           | 13 +++++++++++++
+ 3 files changed, 25 insertions(+), 8 deletions(-)
+
+diff --git a/core/base.go b/core/base.go
+index 4551e3f4..dacad3ec 100644
+--- a/core/base.go
++++ b/core/base.go
+@@ -1368,9 +1368,11 @@ func (app *BaseApp) registerBaseHooks() {
+ 			app.Logger().Warn("Failed to run periodic PRAGMA wal_checkpoint for the auxiliary DB", slog.String("error", execErr.Error()))
+ 		}
+ 
+-		_, execErr = app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
+-		if execErr != nil {
+-			app.Logger().Warn("Failed to run periodic PRAGMA optimize", slog.String("error", execErr.Error()))
++		if !isMySQLDataDB(app) {
++			_, execErr = app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
++			if execErr != nil {
++				app.Logger().Warn("Failed to run periodic PRAGMA optimize", slog.String("error", execErr.Error()))
++			}
+ 		}
+ 	})
+ 
+diff --git a/core/collection_record_table_sync.go b/core/collection_record_table_sync.go
+index 301d5464..cd523024 100644
+--- a/core/collection_record_table_sync.go
++++ b/core/collection_record_table_sync.go
+@@ -142,11 +142,13 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 		return txErr
+ 	}
+ 
+-	// run optimize per the SQLite recommendations
+-	// (https://www.sqlite.org/pragma.html#pragma_optimize)
+-	_, optimizeErr := app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
+-	if optimizeErr != nil {
+-		app.Logger().Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", optimizeErr.Error()))
++	if !isMySQLDataDB(app) {
++		// run optimize per the SQLite recommendations
++		// (https://www.sqlite.org/pragma.html#pragma_optimize)
++		_, optimizeErr := app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
++		if optimizeErr != nil {
++			app.Logger().Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", optimizeErr.Error()))
++		}
+ 	}
+ 
+ 	return nil
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index b635d370..fb80d1d3 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -325,3 +325,16 @@ GET /api/collections/qa_posts/records?sort=title -> 200
+ ```
+ 
+ Remaining warnings still include MySQL-incompatible SQLite maintenance/introspection queries during schema sync, especially `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master`. The next runtime QA target should exercise schema changes and index/list/JSON fields to turn those warnings into concrete compatibility fixes.
++
++## Runtime QA PRAGMA Optimize Result
++
++The record-table schema sync path no longer runs SQLite `PRAGMA optimize` for MySQL-backed data DBs. SQLite keeps the existing immediate post-sync optimization and periodic optimization behavior.
++
++Manual QA with a fresh MySQL 8.4 container still passes collection creation, and the server log no longer emits the previous warning:
++
++```text
++WARN Failed to run PRAGMA optimize after record table sync
++└─ Error 1064 (42000): ... near 'PRAGMA optimize'
++```
++
++Remaining runtime compatibility noise is now focused on schema/index introspection queries using `sqlite_schema` and `sqlite_master` during collection creation and validation.
+-- 
+2.54.0.windows.1
+

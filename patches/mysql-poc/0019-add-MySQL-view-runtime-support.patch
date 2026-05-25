@@ -1,0 +1,231 @@
+From 7c8a2e4b4f693c2a2d3e0fc63cd21b91739eb0f0 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 02:45:59 +0700
+Subject: [PATCH 19/32] add MySQL view runtime support
+
+---
+ core/collection_query.go        | 26 +++++++++++---
+ core/view.go                    | 11 +++++-
+ docs/mysql-gap-analysis.md      | 34 ++++++++++++++++++
+ docs/mysql-upstream-workflow.md |  2 +-
+ scripts/mysql-runtime-qa.sh     | 64 +++++++++++++++++++++++++++++++++
+ 5 files changed, 131 insertions(+), 6 deletions(-)
+
+diff --git a/core/collection_query.go b/core/collection_query.go
+index 69b53249..de4c0749 100644
+--- a/core/collection_query.go
++++ b/core/collection_query.go
+@@ -314,8 +314,17 @@ func normalizeViewQueryId(app App, query string) (string, error) {
+ 	}
+ 
+ 	for _, row := range info {
+-		if strings.EqualFold(row.Name, FieldNameId) && strings.EqualFold(row.Type, "TEXT") {
+-			return query, nil // no wrapping needed
++		if strings.EqualFold(row.Name, FieldNameId) {
++			if strings.EqualFold(row.Type, "TEXT") {
++				return query, nil // no wrapping needed
++			}
++
++			if isMySQLDataDB(app) {
++				rowType := strings.ToUpper(row.Type)
++				if strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT") {
++					return query, nil // already string-compatible for MySQL ids
++				}
++			}
+ 		}
+ 	}
+ 
+@@ -326,15 +335,24 @@ func normalizeViewQueryId(app App, query string) (string, error) {
+ 	}
+ 
+ 	columns := make([]string, 0, len(rawParsed.columns))
++	viewSourceAlias := "__pb_view_source"
+ 	for _, col := range rawParsed.columns {
+ 		if col.alias == FieldNameId {
+-			columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
++			if isMySQLDataDB(app) {
++				columns = append(columns, fmt.Sprintf("CAST([[%s]] as CHAR(255)) [[%s]]", col.alias, col.alias))
++			} else {
++				columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
++			}
+ 		} else {
+ 			columns = append(columns, "[["+col.alias+"]]")
+ 		}
+ 	}
+ 
+-	query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
++	if isMySQLDataDB(app) {
++		query = fmt.Sprintf("SELECT %s FROM (%s) [[%s]]", strings.Join(columns, ","), query, viewSourceAlias)
++	} else {
++		query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
++	}
+ 
+ 	return query, nil
+ }
+diff --git a/core/view.go b/core/view.go
+index 5b44e8bc..71c3302e 100644
+--- a/core/view.go
++++ b/core/view.go
+@@ -51,7 +51,11 @@ func (app *BaseApp) SaveView(dangerousViewName string, dangerousSelectQuery stri
+ 		//
+ 		// note: the query is wrapped in a secondary SELECT as a rudimentary
+ 		// measure to discourage multiple inline sql statements execution
++		viewSourceAlias := "__pb_view_source"
+ 		viewQuery := fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s)", dangerousViewName, dangerousSelectQuery)
++		if isMySQLDataDB(txApp) {
++			viewQuery = fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s) [[%s]]", dangerousViewName, dangerousSelectQuery, viewSourceAlias)
++		}
+ 		_, err = txApp.DB().NewQuery(viewQuery).Execute()
+ 		if err != nil {
+ 			return err
+@@ -160,11 +164,16 @@ func (app *BaseApp) DryRunView(dangerousSelectQuery string, sampleSize int) (*Dr
+ 	}
+ 
+ 	records := []*Record{}
++	viewSourceAlias := "__pb_view_source"
++	fromQuery := "(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName
++	if isMySQLDataDB(app) {
++		fromQuery = "(SELECT * FROM (" + dangerousSelectQuery + ") as " + viewSourceAlias + ") as " + tempName
++	}
+ 
+ 	err = app.RecordQuery(tempCollection).
+ 		// note: the query is wrapped in a secondary SELECT as a rudimentary
+ 		// measure to discourage multiple inline sql statements execution
+-		From("(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName).
++		From(fromQuery).
+ 		Limit(int64(sampleSize)).
+ 		All(&records)
+ 	if err != nil {
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index f169b129..1fb88705 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -421,3 +421,37 @@ GET /api/collections/qa_matrix/records?filter=state~"draft" -> 200
+ PATCH multi select -> single select -> 200
+ GET /api/collections/qa_matrix/records?filter=state="published" -> 200
+ ```
++
++## Runtime QA Relation-Many and View Result
++
++Relation-many runtime now passes on MySQL for the covered surface:
++
++```text
++POST /api/collections qa_authors -> 200
++POST /api/collections qa_books with authors relation maxSelect=3 -> 200
++POST /api/collections/qa_books/records with authors [id1,id2] -> 200
++GET /api/collections/qa_authors/records?filter=qa_books_via_authors.title~"Book" -> 200
++GET /api/collections/qa_books/records?filter=authors.name~"Author" -> 200
++GET /api/collections/qa_books/records?expand=authors -> 200
++```
++
++The main MySQL-specific fixes were:
++
++- replacing SQLite `json_each(...)` relation-array joins with MySQL-safe relation comparisons,
++- using `JSON_CONTAINS(..., JSON_QUOTE(id))` for MySQL relation-many joins,
++- keeping binary-safe id comparisons where relation value extraction still participates in SQL predicates.
++
++Simple view collections now also pass on MySQL:
++
++```text
++POST /api/collections qa_books_view type=view viewQuery="SELECT id, title FROM qa_books" -> 200
++GET /api/collections/qa_books_view/records -> 200 (superuser auth)
++GET /api/collections/qa_books_view/records?filter=title~"Book" -> 200
++POST /api/collections/qa_books/records title="Book Two" -> 200
++GET /api/collections/qa_books_view/records?sort=title -> 200 with both Book One and Book Two
++```
++
++The MySQL view fixes required:
++
++- adding aliases to derived-table wrappers used during persistent view creation and temp-view introspection,
++- avoiding repeated MySQL rewrapping when the normalized `id` column is already `CHAR`/`VARCHAR`.
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index fa4a6d4e..8fb81436 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -52,7 +52,7 @@ scripts/export-mysql-patches.sh <new-base-ref>
+ 
+ ## MySQL QA Script
+ 
+-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), and verifies single/multiple select record behavior.
++`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
+ 
+ Requirements:
+ 
+diff --git a/scripts/mysql-runtime-qa.sh b/scripts/mysql-runtime-qa.sh
+index c8a1d06e..8dab4bac 100755
+--- a/scripts/mysql-runtime-qa.sh
++++ b/scripts/mysql-runtime-qa.sh
+@@ -192,6 +192,70 @@ curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+ curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state=%22published%22" \
+ 	> "$tmp_dir/filter_matrix_single_records.json"
+ 
++curl -sS -f -X POST "$base_url/api/collections" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"qa_authors","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"name","type":"text","required":true,"max":255}]}' \
++	> "$tmp_dir/create_authors_collection.json"
++
++authors_collection_id="$(jq -r '.id' "$tmp_dir/create_authors_collection.json")"
++
++curl -sS -f -X POST "$base_url/api/collections" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"qa_books","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"authors","type":"relation","required":false,"collectionId":"'"${authors_collection_id}"'","maxSelect":3}]}' \
++	> "$tmp_dir/create_books_collection.json"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"Author One"}' \
++	> "$tmp_dir/create_author_one.json"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"Author Two"}' \
++	> "$tmp_dir/create_author_two.json"
++
++author_one_id="$(jq -r '.id' "$tmp_dir/create_author_one.json")"
++author_two_id="$(jq -r '.id' "$tmp_dir/create_author_two.json")"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"title":"Book One","authors":["'"${author_one_id}"'","'"${author_two_id}"'"]}' \
++	> "$tmp_dir/create_book_one.json"
++
++curl -sS -f "$base_url/api/collections/qa_authors/records?filter=qa_books_via_authors.title~%22Book%22" \
++	> "$tmp_dir/filter_back_relation_records.json"
++
++curl -sS -f "$base_url/api/collections/qa_books/records?filter=authors.name~%22Author%22" \
++	> "$tmp_dir/filter_forward_relation_records.json"
++
++curl -sS -f "$base_url/api/collections/qa_books/records?expand=authors" \
++	> "$tmp_dir/expand_relation_records.json"
++
++curl -sS -f -X POST "$base_url/api/collections" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"qa_books_view","type":"view","viewQuery":"SELECT id, title FROM qa_books"}' \
++	> "$tmp_dir/create_books_view_collection.json"
++
++curl -sS -f "$base_url/api/collections/qa_books_view/records" \
++	-H "Authorization: Bearer ${token}" \
++	> "$tmp_dir/list_books_view_records.json"
++
++curl -sS -f "$base_url/api/collections/qa_books_view/records?filter=title~%22Book%22" \
++	-H "Authorization: Bearer ${token}" \
++	> "$tmp_dir/filter_books_view_records.json"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"title":"Book Two"}' \
++	> "$tmp_dir/create_book_two.json"
++
++curl -sS -f "$base_url/api/collections/qa_books_view/records?sort=title" \
++	-H "Authorization: Bearer ${token}" \
++	> "$tmp_dir/list_books_view_after_update.json"
++
+ if grep -q "ERROR" "$tmp_dir/pb.log"; then
+ 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
+ 	grep "ERROR" "$tmp_dir/pb.log" >&2
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,270 @@
+From e4e04c59f728f131c67b5a5529fccad6779551b7 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 02:45:37 +0700
+Subject: [PATCH 18/32] fix MySQL relation many filters
+
+---
+ core/record_field_resolver_runner.go | 128 ++++++++++++++++++---------
+ tools/dbutils/json.go                |   8 ++
+ tools/search/filter.go               |  19 ++--
+ 3 files changed, 108 insertions(+), 47 deletions(-)
+
+diff --git a/core/record_field_resolver_runner.go b/core/record_field_resolver_runner.go
+index f44fd147..c3869e80 100644
+--- a/core/record_field_resolver_runner.go
++++ b/core/record_field_resolver_runner.go
+@@ -58,6 +58,22 @@ type runner struct {
+ 	multiMatch                 *search.MultiMatchSubquery // the multi-match subquery expression generated from the fieldName
+ }
+ 
++func relationValueEquals(resolver *RecordFieldResolver, leftIdentifier string, rightIdentifier string) string {
++	if isMySQLDataDB(resolver.app) {
++		return fmt.Sprintf("BINARY %s = BINARY %s", leftIdentifier, rightIdentifier)
++	}
++
++	return fmt.Sprintf("%s = %s", leftIdentifier, rightIdentifier)
++}
++
++func relationArrayContainsIdentifier(resolver *RecordFieldResolver, jsonArrayIdentifier string, idIdentifier string) string {
++	if isMySQLDataDB(resolver.app) {
++		return fmt.Sprintf("JSON_CONTAINS(%s, JSON_QUOTE(%s))", jsonArrayIdentifier, idIdentifier)
++	}
++
++	return ""
++}
++
+ func (r *runner) run() (*search.ResolverResult, error) {
+ 	if r.used {
+ 		return nil, errors.New("the runner was already used")
+@@ -564,17 +580,19 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				}
+ 			} else {
+ 				jeAlias := "__je_" + newTableAlias
+-				err := r.resolver.registerJoin(
+-					newCollectionName,
+-					newTableAlias,
+-					dbx.NewExp(fmt.Sprintf(
+-						"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+-						r.activeTableAlias,
+-						jeAlias,
++				var on dbx.Expression
++				if isMySQLDataDB(r.resolver.app) {
++					on = dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias+"."+cleanBackFieldName+"]]", "[["+r.activeTableAlias+".id]]"))
++				} else {
++					on = dbx.NewExp(fmt.Sprintf(
++						"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
+ 						dbutils.JSONEach(newTableAlias+"."+cleanBackFieldName),
+ 						jeAlias,
+-					)),
+-				)
++						relationValueEquals(r.resolver, "[["+r.activeTableAlias+".id]]", "[["+jeAlias+".value]]"),
++					))
++				}
++
++				err := r.resolver.registerJoin(newCollectionName, newTableAlias, on)
+ 				if err != nil {
+ 					return nil, err
+ 				}
+@@ -613,13 +631,18 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 					&search.Join{
+ 						TableName:  newCollectionName,
+ 						TableAlias: newTableAlias2,
+-						On: dbx.NewExp(fmt.Sprintf(
+-							"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+-							r.multiMatchActiveTableAlias,
+-							jeAlias2,
+-							dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
+-							jeAlias2,
+-						)),
++						On: func() dbx.Expression {
++							if isMySQLDataDB(r.resolver.app) {
++								return dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias2+"."+cleanBackFieldName+"]]", "[["+r.multiMatchActiveTableAlias+".id]]"))
++							}
++
++							return dbx.NewExp(fmt.Sprintf(
++								"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
++								dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
++								jeAlias2,
++								relationValueEquals(r.resolver, "[["+r.multiMatchActiveTableAlias+".id]]", "[["+jeAlias2+".value]]"),
++							))
++						}(),
+ 					},
+ 				)
+ 			}
+@@ -671,21 +694,33 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				return nil, err
+ 			}
+ 		} else {
+-			jeAlias := "__je_" + newTableAlias
++			if isMySQLDataDB(r.resolver.app) {
++				err := r.resolver.registerJoin(
++					inflector.Columnify(newCollectionName),
++					newTableAlias,
++					dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+prefixedFieldName+"]]", "[["+newTableAlias+".id]]")),
++				)
++				if err != nil {
++					return nil, err
++				}
++			} else {
++				jeAlias := "__je_" + newTableAlias
+ 
+-			err := r.resolver.registerJoin(dbutils.JSONEach(prefixedFieldName), jeAlias, nil)
+-			if err != nil {
+-				return nil, err
+-			}
++				err := r.resolver.registerJoin(dbutils.JSONEach(prefixedFieldName), jeAlias, nil)
++				if err != nil {
++					return nil, err
++				}
+ 
+-			err = r.resolver.registerJoin(
+-				inflector.Columnify(newCollectionName),
+-				newTableAlias,
+-				dbx.NewExp(fmt.Sprintf("[[%s.id]] = [[%s.value]]", newTableAlias, jeAlias)),
+-			)
+-			if err != nil {
+-				return nil, err
++				err = r.resolver.registerJoin(
++					inflector.Columnify(newCollectionName),
++					newTableAlias,
++					dbx.NewExp(relationValueEquals(r.resolver, "[["+newTableAlias+".id]]", "[["+jeAlias+".value]]")),
++				)
++				if err != nil {
++					return nil, err
++				}
+ 			}
++
+ 		}
+ 
+ 		r.activeCollectionName = newCollectionName
+@@ -711,19 +746,30 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				},
+ 			)
+ 		} else {
+-			jeAlias2 := r.multiMatchActiveTableAlias + "_" + cleanFieldName + "_je"
+-			r.multiMatch.Joins = append(
+-				r.multiMatch.Joins,
+-				&search.Join{
+-					TableName:  dbutils.JSONEach(prefixedFieldName2),
+-					TableAlias: jeAlias2,
+-				},
+-				&search.Join{
+-					TableName:  inflector.Columnify(newCollectionName),
+-					TableAlias: newTableAlias2,
+-					On:         dbx.NewExp(fmt.Sprintf("[[%s.id]] = [[%s.value]]", newTableAlias2, jeAlias2)),
+-				},
+-			)
++			if isMySQLDataDB(r.resolver.app) {
++				r.multiMatch.Joins = append(
++					r.multiMatch.Joins,
++					&search.Join{
++						TableName:  inflector.Columnify(newCollectionName),
++						TableAlias: newTableAlias2,
++						On:         dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+prefixedFieldName2+"]]", "[["+newTableAlias2+".id]]")),
++					},
++				)
++			} else {
++				jeAlias2 := r.multiMatchActiveTableAlias + "_" + cleanFieldName + "_je"
++				r.multiMatch.Joins = append(
++					r.multiMatch.Joins,
++					&search.Join{
++						TableName:  dbutils.JSONEach(prefixedFieldName2),
++						TableAlias: jeAlias2,
++					},
++					&search.Join{
++						TableName:  inflector.Columnify(newCollectionName),
++						TableAlias: newTableAlias2,
++						On:         dbx.NewExp(relationValueEquals(r.resolver, "[["+newTableAlias2+".id]]", "[["+jeAlias2+".value]]")),
++					},
++				)
++			}
+ 		}
+ 
+ 		r.multiMatchActiveTableAlias = newTableAlias2
+diff --git a/tools/dbutils/json.go b/tools/dbutils/json.go
+index 72345649..88c917cb 100644
+--- a/tools/dbutils/json.go
++++ b/tools/dbutils/json.go
+@@ -2,12 +2,20 @@ package dbutils
+ 
+ import (
+ 	"fmt"
++	"os"
+ 	"strings"
+ )
+ 
+ // JSONEach returns JSON_EACH SQLite string expression with
+ // some normalizations for non-json columns.
+ func JSONEach(column string) string {
++	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++		return fmt.Sprintf(
++			`JSON_TABLE(CASE WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY' THEN [[%s]] ELSE JSON_ARRAY([[%s]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
++			column, column, column, column,
++		)
++	}
++
+ 	// note: we are not using the new and shorter "if(x,y)" syntax for
+ 	// compatibility with custom drivers that use older SQLite version
+ 	return fmt.Sprintf(
+diff --git a/tools/search/filter.go b/tools/search/filter.go
+index 7d655ce2..9c8a4731 100644
+--- a/tools/search/filter.go
++++ b/tools/search/filter.go
+@@ -4,6 +4,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"os"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -14,8 +15,6 @@ import (
+ 	"github.com/spf13/cast"
+ )
+ 
+-const defaultLikeEscapeClause = " ESCAPE '\\'"
+-
+ // FilterData is a filter expression string following the `fexpr` package grammar.
+ //
+ // The filter string can also contain dbx placeholder parameters (eg. "title = {:name}"),
+@@ -173,7 +172,15 @@ func likeEscapeClause(fieldResolver FieldResolver) string {
+ 		return r.LikeEscapeClause()
+ 	}
+ 
+-	return defaultLikeEscapeClause
++	return defaultLikeEscapeClause()
++}
++
++func defaultLikeEscapeClause() string {
++	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++		return " ESCAPE '\\\\'"
++	}
++
++	return " ESCAPE '\\'"
+ }
+ 
+ func buildResolversExpr(
+@@ -661,7 +668,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 			// doesn't matter whether it is applied on the left or right subquery operand
+ 			AfterBuild: dbx.Not, // inverse for the not-exist expression
+ 		},
+-		defaultLikeEscapeClause,
++		defaultLikeEscapeClause(),
+ 	)
+ 
+ 	if buildErr != nil {
+@@ -720,9 +727,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 	var buildErr error
+ 
+ 	if e.inverse {
+-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause)
++		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause())
+ 	} else {
+-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause)
++		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause())
+ 	}
+ 
+ 	if buildErr != nil {
+-- 
+2.54.0.windows.1
+

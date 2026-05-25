@@ -1,0 +1,144 @@
+From fdb7b46a1364d194c9a250c5de483f4f4dc74e5d Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 21:25:26 +0700
+Subject: [PATCH 32/32] Update docs baseline references from v0.38.0 to v0.38.2
+
+---
+ README.md                       |  6 +++---
+ docs/mysql-gap-analysis.md      |  8 ++++----
+ docs/mysql-upstream-workflow.md | 22 ++++++++++++++--------
+ 3 files changed, 21 insertions(+), 15 deletions(-)
+
+diff --git a/README.md b/README.md
+index 96e949b6..c0b6977a 100644
+--- a/README.md
++++ b/README.md
+@@ -16,7 +16,7 @@ This repository is a PocketBase fork that adds a MySQL-backed data DB PoC while
+ 
+ Current baseline:
+ 
+-- upstream source imported from PocketBase `v0.38.0`
++- upstream source imported from PocketBase `v0.38.2`
+ - active development branch: `mysql/main`
+ - upstream remote kept as `upstream`
+ - GitHub fork repo: `fadlee/pocketbase-mysql`
+@@ -48,7 +48,7 @@ See `docs/mysql-upstream-workflow.md` for the detailed rebase and patch workflow
+ 
+ ## Parity Snapshot
+ 
+-Compared with upstream PocketBase `v0.38.0`, the MySQL fork currently has the following runtime status:
++Compared with upstream PocketBase `v0.38.2`, the MySQL fork currently has the following runtime status:
+ 
+ | Area | Status | Notes |
+ |---|---|---|
+@@ -137,7 +137,7 @@ Publish behavior:
+ 
+ - push to `mysql/main` -> push `ghcr.io/fadlee/pocketbase-mysql:mysql-main`
+ - default branch builds can also carry `latest` when `mysql/main` is the repo default branch
+-- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.38.0-mysql.1`
++- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.38.2-mysql.1`
+ 
+ The workflow builds multi-arch images for:
+ 
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index 1fb88705..c6442510 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -1,6 +1,6 @@
+ # MySQL Gap Analysis
+ 
+-Baseline: PocketBase v0.38.0.
++Baseline: PocketBase v0.38.2.
+ 
+ This document tracks the first SQLite-specific areas that must be addressed before a MySQL backend can work. See `docs/mysql-upstream-workflow.md` for the patch-stack, upstream update, and runtime QA workflow used to keep this fork rebaseable.
+ 
+@@ -8,7 +8,7 @@ This document tracks the first SQLite-specific areas that must be addressed befo
+ 
+ - `go build ./...`: passed.
+ - `go test ./...`: passed.
+-- Upstream source imported from tag `v0.38.0` on branch `mysql/main`.
++- Upstream source imported from tag `v0.38.2` on branch `mysql/rebase-v0.38.2`.
+ 
+ ## Initial High-Risk Areas
+ 
+@@ -257,11 +257,11 @@ Interpretation:
+ 
+ - The initial system migration can now complete on MySQL.
+ - The next blocker is a historical migration that expects the legacy `_params` table shape with a `key` column.
+-- Since this fork starts from a fresh v0.38.0 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
++- Since this fork starts from a fresh v0.38.2 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
+ 
+ ## Milestone 2 Legacy v0.23 Migration Skip Result
+ 
+-The legacy v0.23 migration group now exits early for MySQL. These migrations are upgrade-only paths for older SQLite schemas and are not needed for the fresh MySQL v0.38.0 schema created by `1640988000_init.go`.
++The legacy v0.23 migration group now exits early for MySQL. These migrations are upgrade-only paths for older SQLite schemas and are not needed for the fresh MySQL v0.38.2 schema created by `1640988000_init.go`.
+ 
+ Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
+ 
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 1e47df04..375d3122 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -10,25 +10,31 @@ Export the current MySQL patch stack:
+ scripts/export-mysql-patches.sh
+ ```
+ 
+-By default the script exports commits after `7829cb3b`, the imported PocketBase v0.38.0 baseline commit in this repository. Override the base when needed:
++By default the script exports commits after the upstream baseline tag. For the v0.38.2 upgrade, the base ref is `v0.38.2`:
+ 
+ ```sh
+-scripts/export-mysql-patches.sh <base-ref>
++node scripts/export-mysql-patches.mjs v0.38.2
++```
++
++For older branches based on v0.38.1, use:
++
++```sh
++node scripts/export-mysql-patches.mjs v0.38.1
+ ```
+ 
+ Apply an exported stack to a clean worktree:
+ 
+ ```sh
+-scripts/apply-mysql-patches.sh patches/mysql-poc
++node scripts/apply-mysql-patches.mjs patches/mysql-poc
+ ```
+ 
+-The apply script refuses to run on a dirty worktree and uses `git am`, so patch metadata and commit boundaries remain intact.
++The apply script refuses to run on a dirty worktree (ignoring untracked files) and uses `git am --3way`, so patch metadata and commit boundaries remain intact.
+ 
+ ## Upstream Update Checklist
+ 
+ 1. Fetch upstream and choose the new PocketBase baseline commit or tag.
+ 2. Create a new branch from that upstream baseline.
+-3. Apply the MySQL patch stack with `scripts/apply-mysql-patches.sh`.
++3. Apply the MySQL patch stack with `node scripts/apply-mysql-patches.mjs`.
+ 4. Resolve conflicts one patch at a time, preserving commit boundaries when practical.
+ 5. Run the SQLite baseline checks:
+ 
+@@ -40,19 +46,19 @@ go test ./...
+ 6. Run the MySQL PoC runtime check:
+ 
+ ```sh
+-scripts/mysql-runtime-qa.sh
++node scripts/mysql-runtime-qa.mjs
+ ```
+ 
+ 7. Update `docs/mysql-gap-analysis.md` with any new upstream drift, blocker, or verified behavior.
+ 8. Export a fresh patch stack after the branch is clean:
+ 
+ ```sh
+-scripts/export-mysql-patches.sh <new-base-ref>
++node scripts/export-mysql-patches.mjs <new-base-ref>
+ ```
+ 
+ ## MySQL QA Script
+ 
+-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
++`scripts/mysql-runtime-qa.mjs` (Node.js wrapper around `scripts/mysql_runtime_qa.py`) starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
+ 
+ Requirements:
+ 
+-- 
+2.54.0.windows.1
+

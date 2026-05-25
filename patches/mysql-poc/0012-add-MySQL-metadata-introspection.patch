@@ -1,0 +1,192 @@
+From d9bfcecac68b46bc9e86aab3cc58e6ae364306d5 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 00:50:05 +0700
+Subject: [PATCH 12/32] add MySQL metadata introspection
+
+---
+ core/collection_validate.go | 32 ++++++++++++-----
+ core/db_table.go            | 69 +++++++++++++++++++++++++++++++++++++
+ docs/mysql-gap-analysis.md  | 19 ++++++++++
+ 3 files changed, 112 insertions(+), 8 deletions(-)
+
+diff --git a/core/collection_validate.go b/core/collection_validate.go
+index 5b83bb8d..34b08cdc 100644
+--- a/core/collection_validate.go
++++ b/core/collection_validate.go
+@@ -562,14 +562,30 @@ func (cv *collectionValidator) checkIndexes(value any) error {
+ 
+ 		// ensure that the index name is not used in another collection
+ 		var usedTblName string
+-		_ = cv.app.ConcurrentDB().Select("tbl_name").
+-			From("sqlite_master").
+-			AndWhere(dbx.HashExp{"type": "index"}).
+-			AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:oldName})", dbx.Params{"oldName": cv.original.Name})).
+-			AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:newName})", dbx.Params{"newName": cv.new.Name})).
+-			AndWhere(dbx.NewExp("LOWER([[name]])=LOWER({:indexName})", dbx.Params{"indexName": parsed.IndexName})).
+-			Limit(1).
+-			Row(&usedTblName)
++		if isMySQLDataDB(cv.app) {
++			_ = cv.app.ConcurrentDB().NewQuery(`
++				SELECT TABLE_NAME
++				FROM information_schema.STATISTICS
++				WHERE TABLE_SCHEMA = DATABASE()
++					AND LOWER(TABLE_NAME) != LOWER({:oldName})
++					AND LOWER(TABLE_NAME) != LOWER({:newName})
++					AND LOWER(INDEX_NAME) = LOWER({:indexName})
++				LIMIT 1
++			`).Bind(dbx.Params{
++				"oldName":   cv.original.Name,
++				"newName":   cv.new.Name,
++				"indexName": parsed.IndexName,
++			}).Row(&usedTblName)
++		} else {
++			_ = cv.app.ConcurrentDB().Select("tbl_name").
++				From("sqlite_master").
++				AndWhere(dbx.HashExp{"type": "index"}).
++				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:oldName})", dbx.Params{"oldName": cv.original.Name})).
++				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:newName})", dbx.Params{"newName": cv.new.Name})).
++				AndWhere(dbx.NewExp("LOWER([[name]])=LOWER({:indexName})", dbx.Params{"indexName": parsed.IndexName})).
++				Limit(1).
++				Row(&usedTblName)
++		}
+ 		if usedTblName != "" {
+ 			return validation.Errors{
+ 				strconv.Itoa(i): validation.NewError(
+diff --git a/core/db_table.go b/core/db_table.go
+index 47237ed2..4aa9634d 100644
+--- a/core/db_table.go
++++ b/core/db_table.go
+@@ -10,6 +10,16 @@ import (
+ // TableColumns returns all column names of a single table by its name.
+ func (app *BaseApp) TableColumns(tableName string) ([]string, error) {
+ 	columns := []string{}
++	if isMySQLDataDB(app) {
++		err := app.ConcurrentDB().NewQuery(`
++			SELECT COLUMN_NAME
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION
++		`).Bind(dbx.Params{"tableName": tableName}).Column(&columns)
++
++		return columns, err
++	}
+ 
+ 	err := app.ConcurrentDB().NewQuery("SELECT name FROM PRAGMA_TABLE_INFO({:tableName})").
+ 		Bind(dbx.Params{"tableName": tableName}).
+@@ -33,6 +43,28 @@ type TableInfoRow struct {
+ // TableInfo returns the "table_info" pragma result for the specified table.
+ func (app *BaseApp) TableInfo(tableName string) ([]*TableInfoRow, error) {
+ 	info := []*TableInfoRow{}
++	if isMySQLDataDB(app) {
++		err := app.ConcurrentDB().NewQuery(`
++			SELECT
++				ORDINAL_POSITION - 1 AS cid,
++				COLUMN_NAME AS name,
++				COLUMN_TYPE AS type,
++				CASE WHEN IS_NULLABLE = 'NO' THEN 1 ELSE 0 END AS notnull,
++				COLUMN_DEFAULT AS dflt_value,
++				CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END AS pk
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION
++		`).Bind(dbx.Params{"tableName": tableName}).All(&info)
++		if err != nil {
++			return nil, err
++		}
++		if len(info) == 0 {
++			return nil, fmt.Errorf("empty table info probably due to invalid or missing table %s", tableName)
++		}
++
++		return info, nil
++	}
+ 
+ 	err := app.ConcurrentDB().NewQuery("SELECT * FROM PRAGMA_TABLE_INFO({:tableName})").
+ 		Bind(dbx.Params{"tableName": tableName}).
+@@ -58,6 +90,24 @@ func (app *BaseApp) TableIndexes(tableName string) (map[string]string, error) {
+ 		Name string
+ 		Sql  string
+ 	}{}
++	if isMySQLDataDB(app) {
++		err := app.ConcurrentDB().NewQuery(`
++			SELECT INDEX_NAME AS name, CONCAT('INDEX ', INDEX_NAME) AS sql
++			FROM information_schema.STATISTICS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName} AND INDEX_NAME != 'PRIMARY'
++			GROUP BY INDEX_NAME
++		`).Bind(dbx.Params{"tableName": tableName}).All(&indexes)
++		if err != nil {
++			return nil, err
++		}
++
++		result := make(map[string]string, len(indexes))
++		for _, idx := range indexes {
++			result[idx.Name] = idx.Sql
++		}
++
++		return result, nil
++	}
+ 
+ 	err := app.ConcurrentDB().Select("name", "sql").
+ 		From("sqlite_master").
+@@ -98,6 +148,10 @@ func (app *BaseApp) DeleteTable(dangerousTableName string) error {
+ // HasTable checks if a table (or view) with the provided name exists (case insensitive).
+ // in the data.db.
+ func (app *BaseApp) HasTable(tableName string) bool {
++	if isMySQLDataDB(app) {
++		return app.mysqlHasTable(tableName)
++	}
++
+ 	return app.hasTable(app.ConcurrentDB(), tableName)
+ }
+ 
+@@ -120,6 +174,21 @@ func (app *BaseApp) hasTable(db dbx.Builder, tableName string) bool {
+ 	return err == nil && exists > 0
+ }
+ 
++func (app *BaseApp) mysqlHasTable(tableName string) bool {
++	var exists int
++
++	err := app.ConcurrentDB().NewQuery(`
++		SELECT 1
++		FROM information_schema.TABLES
++		WHERE TABLE_SCHEMA = DATABASE()
++			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
++			AND LOWER(TABLE_NAME) = LOWER({:tableName})
++		LIMIT 1
++	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
++
++	return err == nil && exists > 0
++}
++
+ // Vacuum executes VACUUM on the data.db in order to reclaim unused data db disk space.
+ func (app *BaseApp) Vacuum() error {
+ 	return app.vacuum(app.NonconcurrentDB())
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index fb80d1d3..0d5aec78 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -338,3 +338,22 @@ WARN Failed to run PRAGMA optimize after record table sync
+ ```
+ 
+ Remaining runtime compatibility noise is now focused on schema/index introspection queries using `sqlite_schema` and `sqlite_master` during collection creation and validation.
++
++## Runtime QA Introspection Result
++
++The high-traffic data DB metadata helpers now use MySQL `information_schema` when the data DB driver is MySQL:
++
++- table existence checks use `information_schema.TABLES`.
++- table columns and table info use `information_schema.COLUMNS`.
++- table index lookup and collection index-name validation use `information_schema.STATISTICS`.
++
++Manual QA with a fresh MySQL 8.4 container still boots and can create an indexed collection through the REST API:
++
++```text
++POST /api/collections/_superusers/auth-with-password -> 200
++POST /api/collections qa_introspection with idx_qa_introspection_title -> 200
++CREATE TABLE `qa_introspection` (...)
++CREATE INDEX `idx_qa_introspection_title` ON `qa_introspection` (`title`)
++```
++
++The collection creation log now shows `information_schema.TABLES` and `information_schema.STATISTICS` for data DB metadata lookups instead of `sqlite_schema` and `sqlite_master`.
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,76 @@
+From e5be6671822d2741b802de461137fe69e6001d00 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 03:02:33 +0700
+Subject: [PATCH 22/32] add binary build workflow
+
+---
+ .github/workflows/build-pocketbase-mysql.yaml | 57 +++++++++++++++++++
+ 1 file changed, 57 insertions(+)
+ create mode 100644 .github/workflows/build-pocketbase-mysql.yaml
+
+diff --git a/.github/workflows/build-pocketbase-mysql.yaml b/.github/workflows/build-pocketbase-mysql.yaml
+new file mode 100644
+index 00000000..494e9577
+--- /dev/null
++++ b/.github/workflows/build-pocketbase-mysql.yaml
+@@ -0,0 +1,57 @@
++name: build-pocketbase-mysql
++
++on:
++  push:
++    branches:
++      - '**'
++  pull_request:
++
++jobs:
++  build:
++    strategy:
++      fail-fast: false
++      matrix:
++        include:
++          - os: ubuntu-latest
++            goos: linux
++            goarch: amd64
++            binary_suffix: ''
++          - os: ubuntu-latest
++            goos: linux
++            goarch: arm64
++            binary_suffix: ''
++          - os: macos-latest
++            goos: darwin
++            goarch: amd64
++            binary_suffix: ''
++          - os: macos-latest
++            goos: darwin
++            goarch: arm64
++            binary_suffix: ''
++          - os: windows-latest
++            goos: windows
++            goarch: amd64
++            binary_suffix: '.exe'
++    runs-on: ${{ matrix.os }}
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v6
++
++      - name: Set up Go
++        uses: actions/setup-go@v6
++        with:
++          go-version: '1.25.0'
++
++      - name: Build pocketbase-mysql
++        env:
++          CGO_ENABLED: 0
++          GOOS: ${{ matrix.goos }}
++          GOARCH: ${{ matrix.goarch }}
++        run: go build -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
++
++      - name: Upload artifact
++        uses: actions/upload-artifact@v4
++        with:
++          name: pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}
++          path: pocketbase-mysql${{ matrix.binary_suffix }}
++          if-no-files-found: error
+-- 
+2.54.0.windows.1
+

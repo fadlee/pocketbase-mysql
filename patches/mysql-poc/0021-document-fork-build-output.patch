@@ -1,0 +1,66 @@
+From 2d3827cb180a40baaffe8c74140d25b9cca0fba2 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 02:58:32 +0700
+Subject: [PATCH 21/32] document fork build output
+
+---
+ Makefile                        |  3 +++
+ docs/mysql-upstream-workflow.md | 28 ++++++++++++++++++++++++++++
+ 2 files changed, 31 insertions(+)
+
+diff --git a/Makefile b/Makefile
+index 5418e1a3..35be4725 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,6 +1,9 @@
+ lint:
+ 	golangci-lint run -c ./golangci.yml ./...
+ 
++build:
++	go build -o pocketbase-mysql ./examples/base
++
+ test:
+ 	go test ./... -v --cover
+ 
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 8fb81436..05010ca7 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -75,6 +75,34 @@ MYSQL_QA_DATABASE=pocketbase
+ 
+ The script is intentionally a smoke test, not a full compatibility suite. Extend it when a new runtime blocker is fixed so future upstream updates catch regressions.
+ 
++## Build Output
++
++`go build ./...` is a compile verification step only. It does not produce a single final application binary in the repository root.
++
++To build the runnable fork binary in this repository, use:
++
++```sh
++make build
++```
++
++or directly:
++
++```sh
++go build -o pocketbase-mysql ./examples/base
++```
++
++This produces the executable at:
++
++```sh
++./pocketbase-mysql
++```
++
++Run it with:
++
++```sh
++./pocketbase-mysql serve
++```
++
+ ## Refactor Boundaries
+ 
+ Keep MySQL-specific code behind small seams where possible:
+-- 
+2.54.0.windows.1
+

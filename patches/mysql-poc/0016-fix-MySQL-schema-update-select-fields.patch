@@ -1,0 +1,204 @@
+From 9f9cbbdee3e605ecdae0710a39699d627975c8db Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 01:29:44 +0700
+Subject: [PATCH 16/32] fix MySQL schema update select fields
+
+---
+ core/collection_record_table_sync.go | 16 +++++++++++++-
+ core/db_dialect.go                   |  8 +++++++
+ core/field_file.go                   |  2 +-
+ core/field_relation.go               |  2 +-
+ core/field_select.go                 |  2 +-
+ docs/mysql-gap-analysis.md           | 32 ++++++++++++++++++++++++++++
+ docs/mysql-upstream-workflow.md      |  2 +-
+ scripts/mysql-runtime-qa.sh          | 32 ++++++++++++++++++++++++++++
+ 8 files changed, 91 insertions(+), 5 deletions(-)
+
+diff --git a/core/collection_record_table_sync.go b/core/collection_record_table_sync.go
+index cd523024..3c7e6265 100644
+--- a/core/collection_record_table_sync.go
++++ b/core/collection_record_table_sync.go
+@@ -93,6 +93,15 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 		toRename := map[string]string{}
+ 		for _, field := range newFields {
+ 			oldField := oldFields.GetById(field.GetId())
++			if oldField == nil && isMySQLDataDB(txApp) {
++				_, err := txApp.DB().AddColumn(newTableName, field.GetName(), field.ColumnType(txApp)).Execute()
++				if err != nil {
++					return fmt.Errorf("failed to add column %s - %w", field.GetName(), err)
++				}
++
++				continue
++			}
++
+ 			// Note:
+ 			// We are using a temporary column name when adding or renaming columns
+ 			// to ensure that there are no name collisions in case there is
+@@ -314,7 +323,12 @@ func dropCollectionIndexes(app App, collection *Collection) error {
+ 				return fmt.Errorf("failed to dop index - missing index name: %s", raw)
+ 			}
+ 
+-			_, err := txApp.DB().NewQuery(fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", parsed.IndexName)).Execute()
++			dropQuery := fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", parsed.IndexName)
++			if isMySQLDataDB(txApp) {
++				dropQuery = fmt.Sprintf("DROP INDEX [[%s]] ON [[%s]]", parsed.IndexName, collection.Name)
++			}
++
++			_, err := txApp.DB().NewQuery(dropQuery).Execute()
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 9413332b..e5e847ee 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -22,3 +22,11 @@ func IsMySQLDataDB(app App) bool {
+ 	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+ 	return ok && strings.EqualFold(db.DriverName(), "mysql")
+ }
++
++func jsonArrayColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "JSON NOT NULL"
++	}
++
++	return "JSON DEFAULT '[]' NOT NULL"
++}
+diff --git a/core/field_file.go b/core/field_file.go
+index 33305008..c62f2f2b 100644
+--- a/core/field_file.go
++++ b/core/field_file.go
+@@ -192,7 +192,7 @@ func (f *FileField) IsMultiple() bool {
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *FileField) ColumnType(app App) string {
+ 	if f.IsMultiple() {
+-		return "JSON DEFAULT '[]' NOT NULL"
++		return jsonArrayColumnType(app)
+ 	}
+ 
+ 	if isMySQLDataDB(app) {
+diff --git a/core/field_relation.go b/core/field_relation.go
+index 94147290..66205327 100644
+--- a/core/field_relation.go
++++ b/core/field_relation.go
+@@ -155,7 +155,7 @@ func (f *RelationField) IsMultiple() bool {
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *RelationField) ColumnType(app App) string {
+ 	if f.IsMultiple() {
+-		return "JSON DEFAULT '[]' NOT NULL"
++		return jsonArrayColumnType(app)
+ 	}
+ 
+ 	if isMySQLDataDB(app) {
+diff --git a/core/field_select.go b/core/field_select.go
+index 2957db46..0d9a8763 100644
+--- a/core/field_select.go
++++ b/core/field_select.go
+@@ -142,7 +142,7 @@ func (f *SelectField) IsMultiple() bool {
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *SelectField) ColumnType(app App) string {
+ 	if f.IsMultiple() {
+-		return "JSON DEFAULT '[]' NOT NULL"
++		return jsonArrayColumnType(app)
+ 	}
+ 
+ 	if isMySQLDataDB(app) {
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index 67d5cb51..c43c228d 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -377,3 +377,35 @@ GET /api/collections/qa_introspection/records?filter=title~"intro" -> 200
+ SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\\'
+ {"totalItems":1,"totalPages":1}
+ ```
++
++## Runtime QA Schema Update and Select Fields Result
++
++Adding a new field to an existing MySQL-backed collection exposed a schema sync blocker. The SQLite path adds new/renamed fields with a temporary column name and then renames the column to avoid name collisions. On MySQL, the first `ALTER TABLE ... ADD` completed but the request stayed open before the temporary-column rename:
++
++```text
++UPDATE `_collections` SET `fields`='[...] status ...' WHERE `id`='pbc_2775252010'
++ALTER TABLE `qa_schema` ADD `statusA9Vpo` VARCHAR(255) DEFAULT '' NOT NULL
++```
++
++For MySQL, new fields are now added directly with their final column name. This avoids the unsafe add-then-rename path for the first schema update case while keeping the SQLite collision-avoidance behavior unchanged.
++
++When updating a collection that has indexes, MySQL also needs dialect-specific index drops. SQLite accepts `DROP INDEX IF EXISTS indexName`; MySQL requires `DROP INDEX indexName ON tableName`. The schema sync path now uses the MySQL form for record collection indexes.
++
++Multiple select fields exposed another MySQL DDL blocker:
++
++```text
++Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'tags' can't have a default value.
++```
++
++MySQL now uses `JSON NOT NULL` for JSON-array-backed fields, while SQLite keeps `JSON DEFAULT '[]' NOT NULL`. The same helper is used for multiple select, relation, and file fields.
++
++Manual QA with a fresh MySQL 8.4 container now passes:
++
++```text
++PATCH /api/collections/{id} add single select field -> 200
++POST /api/collections/qa_runtime/records with status -> 200
++GET /api/collections/qa_runtime/records?filter=status="draft" -> 200
++POST /api/collections qa_multi_select with tags maxSelect=3 -> 200
++POST /api/collections/qa_multi_select/records with tags ["alpha","beta"] -> 200
++GET /api/collections/qa_multi_select/records?filter=tags~"alpha" -> 200
++```
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 4be819e4..842c993f 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -52,7 +52,7 @@ scripts/export-mysql-patches.sh <new-base-ref>
+ 
+ ## MySQL QA Script
+ 
+-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, and checks a text `LIKE` filter.
++`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, updates a collection schema with a select field, and verifies single/multiple select record behavior.
+ 
+ Requirements:
+ 
+diff --git a/scripts/mysql-runtime-qa.sh b/scripts/mysql-runtime-qa.sh
+index 35e56490..60b30026 100755
+--- a/scripts/mysql-runtime-qa.sh
++++ b/scripts/mysql-runtime-qa.sh
+@@ -96,6 +96,38 @@ curl -sS -f "$base_url/api/collections/qa_runtime/records?sort=title" \
+ curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=title~%22runtime%22" \
+ 	> "$tmp_dir/filter_records.json"
+ 
++collection_id="$(jq -r '.id' "$tmp_dir/create_collection.json")"
++jq '.fields += [{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}] | {fields:.fields}' \
++	"$tmp_dir/create_collection.json" > "$tmp_dir/add_select_payload.json"
++
++curl -sS -f -X PATCH "$base_url/api/collections/${collection_id}" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data @"$tmp_dir/add_select_payload.json" \
++	> "$tmp_dir/update_collection_add_select.json"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_runtime/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"title":"schema updated","published":false,"status":"draft"}' \
++	> "$tmp_dir/create_record_after_schema_update.json"
++
++curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=status=%22draft%22" \
++	> "$tmp_dir/filter_select_records.json"
++
++curl -sS -f -X POST "$base_url/api/collections" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"qa_multi_select","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"tags","type":"select","required":false,"values":["alpha","beta","gamma"],"maxSelect":3}]}' \
++	> "$tmp_dir/create_multi_select_collection.json"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_multi_select/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"title":"multi select","tags":["alpha","beta"]}' \
++	> "$tmp_dir/create_multi_select_record.json"
++
++curl -sS -f "$base_url/api/collections/qa_multi_select/records?filter=tags~%22alpha%22" \
++	> "$tmp_dir/filter_multi_select_records.json"
++
+ if grep -q "ERROR" "$tmp_dir/pb.log"; then
+ 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
+ 	grep "ERROR" "$tmp_dir/pb.log" >&2
+-- 
+2.54.0.windows.1
+

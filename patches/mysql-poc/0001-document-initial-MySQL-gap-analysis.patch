@@ -1,0 +1,135 @@
+From 403fbdafb2a87b5f82d53d3a2c0355f566a32c42 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 9 May 2026 23:31:41 +0700
+Subject: [PATCH 01/32] document initial MySQL gap analysis
+
+---
+ docs/mysql-gap-analysis.md | 116 +++++++++++++++++++++++++++++++++++++
+ 1 file changed, 116 insertions(+)
+ create mode 100644 docs/mysql-gap-analysis.md
+
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+new file mode 100644
+index 00000000..5bbbfd31
+--- /dev/null
++++ b/docs/mysql-gap-analysis.md
+@@ -0,0 +1,116 @@
++# MySQL Gap Analysis
++
++Baseline: PocketBase v0.38.0.
++
++This document tracks the first SQLite-specific areas that must be addressed before a MySQL backend can work. It intentionally records gaps only; runtime behavior remains unchanged.
++
++## Baseline Verification
++
++- `go build ./...`: passed.
++- `go test ./...`: passed.
++- Upstream source imported from tag `v0.38.0` on branch `mysql/main`.
++
++## Initial High-Risk Areas
++
++### Table and index introspection
++
++Files:
++
++- `core/db_table.go`
++- `core/collection_validate.go`
++
++Current behavior uses SQLite introspection directly:
++
++- `PRAGMA_TABLE_INFO` for table columns and column metadata.
++- `sqlite_master` and `sqlite_schema` for indexes, tables, and views.
++- Global index-name validation via `sqlite_master`.
++
++MySQL work needed:
++
++- Replace table and column discovery with `information_schema` queries or a dialect abstraction.
++- Decide whether PocketBase index names remain globally unique or become table-scoped for MySQL.
++- Preserve existing SQLite behavior as the default path.
++
++### Record table schema sync
++
++File:
++
++- `core/collection_record_table_sync.go`
++
++Current behavior relies on DB operations and SQLite-specific SQL during collection schema changes:
++
++- Record table creation, rename, column add/drop/rename/type changes.
++- Index drop/recreate around schema updates.
++- `PRAGMA optimize` after sync.
++- `sqlite_master` access when updating view metadata.
++- `json_extract` usage when transforming JSON-like field data.
++
++MySQL work needed:
++
++- Audit generated DDL for `CREATE TABLE`, `ALTER TABLE`, `RENAME TABLE`, `DROP COLUMN`, `MODIFY COLUMN`, and index operations.
++- Replace `PRAGMA optimize` with no-op or a MySQL-specific maintenance strategy.
++- Move SQLite JSON transform SQL behind dialect-specific helpers.
++- Account for MySQL implicit commits around DDL.
++
++### Initial migrations
++
++Files:
++
++- `migrations/1640988000_init.go`
++- `migrations/1640988000_aux_init.go`
++
++Current behavior uses SQLite date functions and SQLite-compatible schema definitions:
++
++- `strftime('%Y-%m-%d %H:%M:%fZ')` defaults.
++- Log index expression using `strftime`.
++
++MySQL work needed:
++
++- Define MySQL timestamp defaults, likely `DATETIME(3)` in UTC.
++- Replace expression indexes with MySQL-compatible generated columns or alternate query/index strategy if needed.
++- Decide whether auxiliary/log DB remains SQLite during PoC.
++
++### Query/filter expression functions
++
++Files:
++
++- `tools/search/token_functions.go`
++- `core/record_field_resolver_runner.go`
++- `core/record_field_resolver_test.go`
++
++Current behavior exposes SQLite-like functions and generated SQL:
++
++- `strftime(...)` is supported in filter expressions.
++- JSON fields are wrapped through `dbutils.JSONExtract(...)`.
++- Tests assert SQLite-shaped SQL for filters.
++
++MySQL work needed:
++
++- Decide whether filter functions produce dialect-specific SQL or whether unsupported functions fail explicitly in MySQL mode.
++- Add dialect-aware tests for generated SQL.
++- Keep SQLite SQL output unchanged.
++
++### Connection setup
++
++File:
++
++- `core/db_connect.go`
++
++Current behavior registers and opens the default SQLite driver.
++
++MySQL work needed:
++
++- Add a minimal MySQL connection path for PoC without replacing default SQLite behavior.
++- Decide whether auxiliary DB remains SQLite for PoC.
++- Ensure driver and DSN configuration are explicit, not inferred from database path.
++
++## Recommended Next Step
++
++Start Milestone 2 with the smallest PoC:
++
++1. Add MySQL driver dependency.
++2. Add explicit database driver and DSN configuration path.
++3. Keep SQLite as default.
++4. Boot with `PB_DATABASE_DRIVER=mysql` and record the first real failure after connection.
++
++Do not implement broad dialect abstraction until the PoC confirms the first concrete startup blockers.
+-- 
+2.54.0.windows.1
+
