@@ -1,0 +1,95 @@
+From 34b12af9950b67ffb93065b20f32e409c209d3f5 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 01:11:34 +0700
+Subject: [PATCH 14/32] centralize MySQL data DB detection
+
+---
+ core/db_connect.go |  5 -----
+ core/db_dialect.go | 24 ++++++++++++++++++++++++
+ core/field.go      | 16 ----------------
+ 3 files changed, 24 insertions(+), 21 deletions(-)
+ create mode 100644 core/db_dialect.go
+
+diff --git a/core/db_connect.go b/core/db_connect.go
+index 491b382c..3d10591d 100644
+--- a/core/db_connect.go
++++ b/core/db_connect.go
+@@ -13,11 +13,6 @@ import (
+ 	_ "modernc.org/sqlite"
+ )
+ 
+-const (
+-	envDatabaseDriver = "PB_DATABASE_DRIVER"
+-	envDatabaseDSN    = "PB_DATABASE_DSN"
+-)
+-
+ func DefaultDBConnect(dbPath string) (*dbx.DB, error) {
+ 	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") && filepath.Base(dbPath) == "data.db" {
+ 		dsn := os.Getenv(envDatabaseDSN)
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+new file mode 100644
+index 00000000..9413332b
+--- /dev/null
++++ b/core/db_dialect.go
+@@ -0,0 +1,24 @@
++package core
++
++import (
++	"os"
++	"strings"
++)
++
++const (
++	envDatabaseDriver = "PB_DATABASE_DRIVER"
++	envDatabaseDSN    = "PB_DATABASE_DSN"
++)
++
++func isMySQLDataDB(app App) bool {
++	return IsMySQLDataDB(app)
++}
++
++func IsMySQLDataDB(app App) bool {
++	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") {
++		return true
++	}
++
++	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
++	return ok && strings.EqualFold(db.DriverName(), "mysql")
++}
+diff --git a/core/field.go b/core/field.go
+index 6a39862f..ddd6cbce 100644
+--- a/core/field.go
++++ b/core/field.go
+@@ -3,7 +3,6 @@ package core
+ import (
+ 	"context"
+ 	"database/sql/driver"
+-	"os"
+ 	"regexp"
+ 	"strings"
+ 
+@@ -53,21 +52,6 @@ const (
+ 	InterceptorActionAfterUpdateError = "afterUpdateError"
+ )
+ 
+-// Common field errors.
+-
+-func isMySQLDataDB(app App) bool {
+-	return IsMySQLDataDB(app)
+-}
+-
+-func IsMySQLDataDB(app App) bool {
+-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+-		return true
+-	}
+-
+-	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+-	return ok && db.DriverName() == "mysql"
+-}
+-
+ var (
+ 	ErrUnknownField          = validation.NewError("validation_unknown_field", "Unknown or invalid field.")
+ 	ErrInvalidFieldValue     = validation.NewError("validation_invalid_field_value", "Invalid field value.")
+-- 
+2.54.0.windows.1
+

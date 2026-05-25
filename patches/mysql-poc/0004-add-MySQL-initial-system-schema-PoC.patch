@@ -1,0 +1,149 @@
+From ded30a76b1a75978ca54715bcae9855992bbf2e5 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 9 May 2026 23:51:45 +0700
+Subject: [PATCH 04/32] add MySQL initial system schema PoC
+
+---
+ docs/mysql-gap-analysis.md    | 25 +++++++++++++++
+ migrations/1640988000_init.go | 58 ++++++++++++++++++++++++++++++++---
+ 2 files changed, 79 insertions(+), 4 deletions(-)
+
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index dd1e0a1c..fca0eb09 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -165,3 +165,28 @@ Interpretation:
+ - Migration metadata can now be recorded in MySQL.
+ - The next blocker is the initial system schema migration, starting with `_params`.
+ - MySQL needs dialect-specific replacements for SQLite defaults such as `randomblob(...)` ID generation and `strftime(...)` timestamp defaults.
++
++## Milestone 2 Initial System Schema SQL Result
++
++The initial `_params` and `_collections` schema now uses a MySQL-specific branch while preserving the original SQLite SQL path.
++
++Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
++
++```text
++CREATE TABLE `_params` (
++    `id`      VARCHAR(15) PRIMARY KEY NOT NULL,
++    `value`   JSON DEFAULT NULL,
++    `created` VARCHAR(255) DEFAULT "" NOT NULL,
++    `updated` VARCHAR(255) DEFAULT "" NOT NULL
++);
++CREATE TABLE `_collections` (...);
++CREATE INDEX idx__collections_type on `_collections` (`type`)
++CREATE TABLE `_mfas` (`collectionRef` TEXT DEFAULT '' NOT NULL, ...)
++failed to apply migration 1640988000_init.go: _mfas error: Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'collectionRef' can't have a default value
++```
++
++Interpretation:
++
++- The PoC now passes the hardcoded `_params` and `_collections` startup SQL.
++- The next blocker is generated collection record table DDL from field `ColumnType` values.
++- MySQL cannot use `TEXT DEFAULT ''`, so text/autodate field column generation needs dialect-aware types before system collections such as `_mfas` can be created.
+diff --git a/migrations/1640988000_init.go b/migrations/1640988000_init.go
+index 541f045d..d1ad6aeb 100644
+--- a/migrations/1640988000_init.go
++++ b/migrations/1640988000_init.go
+@@ -2,6 +2,7 @@ package migrations
+ 
+ import (
+ 	"fmt"
++	"os"
+ 	"path/filepath"
+ 	"runtime"
+ 
+@@ -34,7 +35,7 @@ func init() {
+ 
+ 		// -----------------------------------------------------------
+ 
+-		_, execerr := txApp.DB().NewQuery(`
++		collectionsSQL := `
+ 			CREATE TABLE {{_collections}} (
+ 				[[id]]         TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+ 				[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+@@ -53,10 +54,38 @@ func init() {
+ 			);
+ 
+ 			CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);
+-		`).Execute()
++		`
++		if isMySQLDataDB(txApp) {
++			collectionsSQL = `
++				CREATE TABLE {{_collections}} (
++					[[id]]         VARCHAR(15) PRIMARY KEY NOT NULL,
++					[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
++					[[type]]       VARCHAR(255) DEFAULT "base" NOT NULL,
++					[[name]]       VARCHAR(255) UNIQUE NOT NULL,
++					[[fields]]     JSON NOT NULL,
++					[[indexes]]    JSON NOT NULL,
++					[[listRule]]   TEXT DEFAULT NULL,
++					[[viewRule]]   TEXT DEFAULT NULL,
++					[[createRule]] TEXT DEFAULT NULL,
++					[[updateRule]] TEXT DEFAULT NULL,
++					[[deleteRule]] TEXT DEFAULT NULL,
++					[[options]]    JSON NOT NULL,
++					[[created]]    VARCHAR(255) DEFAULT "" NOT NULL,
++					[[updated]]    VARCHAR(255) DEFAULT "" NOT NULL
++				);
++			`
++		}
++
++		_, execerr := txApp.DB().NewQuery(collectionsSQL).Execute()
+ 		if execerr != nil {
+ 			return fmt.Errorf("_collections exec error: %w", execerr)
+ 		}
++		if isMySQLDataDB(txApp) {
++			_, execerr = txApp.DB().NewQuery("CREATE INDEX idx__collections_type on {{_collections}} ([[type]])").Execute()
++			if execerr != nil {
++				return fmt.Errorf("_collections type index error: %w", execerr)
++			}
++		}
+ 
+ 		if err := createMFAsCollection(txApp); err != nil {
+ 			return fmt.Errorf("_mfas error: %w", err)
+@@ -105,18 +134,39 @@ func init() {
+ }
+ 
+ func createParamsTable(txApp core.App) error {
+-	_, execErr := txApp.DB().NewQuery(`
++	query := `
+ 		CREATE TABLE {{_params}} (
+ 			[[id]]      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+ 			[[value]]   JSON DEFAULT NULL,
+ 			[[created]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
+ 			[[updated]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
+ 		);
+-	`).Execute()
++	`
++	if isMySQLDataDB(txApp) {
++		query = `
++			CREATE TABLE {{_params}} (
++				[[id]]      VARCHAR(15) PRIMARY KEY NOT NULL,
++				[[value]]   JSON DEFAULT NULL,
++				[[created]] VARCHAR(255) DEFAULT "" NOT NULL,
++				[[updated]] VARCHAR(255) DEFAULT "" NOT NULL
++			);
++		`
++	}
++
++	_, execErr := txApp.DB().NewQuery(query).Execute()
+ 
+ 	return execErr
+ }
+ 
++func isMySQLDataDB(app core.App) bool {
++	if os.Getenv("PB_DATABASE_DRIVER") == "mysql" {
++		return true
++	}
++
++	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
++	return ok && db.DriverName() == "mysql"
++}
++
+ func createMFAsCollection(txApp core.App) error {
+ 	col := core.NewBaseCollection(core.CollectionNameMFAs)
+ 	col.System = true
+-- 
+2.54.0.windows.1
+

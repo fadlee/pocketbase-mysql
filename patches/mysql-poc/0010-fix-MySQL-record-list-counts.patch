@@ -1,0 +1,77 @@
+From 59d1899657b272d84ef94a0ba0f06a5917bf1e9f Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 00:42:33 +0700
+Subject: [PATCH 10/32] fix MySQL record list counts
+
+---
+ apis/record_crud.go        |  2 +-
+ core/field.go              |  4 ++++
+ docs/mysql-gap-analysis.md | 27 +++++++++++++++++++++++++++
+ 3 files changed, 32 insertions(+), 1 deletion(-)
+
+diff --git a/apis/record_crud.go b/apis/record_crud.go
+index 3a35e93a..f3cb7036 100644
+--- a/apis/record_crud.go
++++ b/apis/record_crud.go
+@@ -80,7 +80,7 @@ func recordsList(e *core.RequestEvent) error {
+ 	searchProvider := search.NewProvider(fieldsResolver).Query(query)
+ 
+ 	// use rowid when available to minimize the need of a covering index with the "id" field
+-	if !collection.IsView() {
++	if !collection.IsView() && !core.IsMySQLDataDB(e.App) {
+ 		searchProvider.CountCol("_rowid_")
+ 	}
+ 
+diff --git a/core/field.go b/core/field.go
+index b8bc8363..6a39862f 100644
+--- a/core/field.go
++++ b/core/field.go
+@@ -56,6 +56,10 @@ const (
+ // Common field errors.
+ 
+ func isMySQLDataDB(app App) bool {
++	return IsMySQLDataDB(app)
++}
++
++func IsMySQLDataDB(app App) bool {
+ 	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+ 		return true
+ 	}
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index b74e15bb..b635d370 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -298,3 +298,30 @@ Interpretation:
+ - The current PoC can boot PocketBase against MySQL and reach the server start state.
+ - Remaining warnings still include SQLite-specific maintenance/introspection calls such as `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master` during schema/cache operations.
+ - Next work should shift from boot blockers to a focused audit of runtime correctness: introspection helpers, CRUD record creation, auth login, index semantics, and JSON/list fields.
++
++## Runtime QA Record List Count Result
++
++The first focused runtime QA pass confirmed that a fresh MySQL 8.4 backend can boot, create a superuser, authenticate through the REST API, create a simple base collection through the collections API, and insert a simple record.
++
++The first runtime blocker appeared when listing records with pagination metadata:
++
++```text
++SELECT `qa_posts`.* FROM `qa_posts` ORDER BY `qa_posts`.`title` ASC LIMIT 30
++SELECT COUNT(DISTINCT `qa_posts`.`_rowid_`) FROM `qa_posts`
++ERROR GET /api/collections/qa_posts/records?sort=title
++└─ Error 1054 (42S22): Unknown column 'qa_posts._rowid_' in 'field list'
++```
++
++The records list API now keeps the SQLite `_rowid_` count optimization only for SQLite-backed record tables. MySQL leaves the search provider default `id` count column, producing a portable count query for normal record collections.
++
++Manual QA with a fresh MySQL 8.4 container now passes the simple runtime CRUD probe:
++
++```text
++POST /api/collections/_superusers/auth-with-password -> 200
++POST /api/collections -> 200
++POST /api/collections/qa_posts/records -> 200
++GET /api/collections/qa_posts/records?sort=title -> 200
++{"totalItems":1,"totalPages":1}
++```
++
++Remaining warnings still include MySQL-incompatible SQLite maintenance/introspection queries during schema sync, especially `PRAGMA optimize`, `sqlite_schema`, and `sqlite_master`. The next runtime QA target should exercise schema changes and index/list/JSON fields to turn those warnings into concrete compatibility fixes.
+-- 
+2.54.0.windows.1
+

@@ -1,0 +1,286 @@
+From e92b0007a3426506a79bfcc55335fe41edfdc67f Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 06:39:45 +0700
+Subject: [PATCH 26/32] add app-only container publishing
+
+---
+ .dockerignore                       | 12 +++++++
+ .github/workflows/publish-ghcr.yaml | 54 +++++++++++++++++++++++++++++
+ Dockerfile                          | 43 +++++++++++++++++++++++
+ README.md                           | 54 +++++++++++++++++++++++++++++
+ docker-compose.mysql.yml            | 33 ++++++++++++++++++
+ docs/mysql-upstream-workflow.md     | 23 ++++++++++++
+ 6 files changed, 219 insertions(+)
+ create mode 100644 .dockerignore
+ create mode 100644 .github/workflows/publish-ghcr.yaml
+ create mode 100644 Dockerfile
+ create mode 100644 docker-compose.mysql.yml
+
+diff --git a/.dockerignore b/.dockerignore
+new file mode 100644
+index 00000000..6cb9f304
+--- /dev/null
++++ b/.dockerignore
+@@ -0,0 +1,12 @@
++.git
++.github
++.sisyphus
++pb_data
++patches
++ui/node_modules
++ui/dist
++node_modules
++coverage.out
++pocketbase-mysql
++Dockerfile*
++docker-compose*.yml
+diff --git a/.github/workflows/publish-ghcr.yaml b/.github/workflows/publish-ghcr.yaml
+new file mode 100644
+index 00000000..f064032c
+--- /dev/null
++++ b/.github/workflows/publish-ghcr.yaml
+@@ -0,0 +1,54 @@
++name: publish-ghcr
++
++on:
++  push:
++    branches:
++      - mysql/main
++    tags:
++      - 'v*'
++  workflow_dispatch:
++
++permissions:
++  contents: read
++  packages: write
++
++jobs:
++  docker:
++    runs-on: ubuntu-latest
++    steps:
++      - name: Checkout
++        uses: actions/checkout@v6
++
++      - name: Set up QEMU
++        uses: docker/setup-qemu-action@v3
++
++      - name: Set up Docker Buildx
++        uses: docker/setup-buildx-action@v3
++
++      - name: Log in to GHCR
++        uses: docker/login-action@v3
++        with:
++          registry: ghcr.io
++          username: ${{ github.actor }}
++          password: ${{ secrets.GITHUB_TOKEN }}
++
++      - name: Docker metadata
++        id: meta
++        uses: docker/metadata-action@v5
++        with:
++          images: ghcr.io/${{ github.repository }}
++          tags: |
++            type=raw,value=latest,enable={{is_default_branch}}
++            type=raw,value=mysql-main,enable=${{ github.ref == 'refs/heads/mysql/main' }}
++            type=ref,event=tag
++            type=sha
++
++      - name: Build and push image
++        uses: docker/build-push-action@v6
++        with:
++          context: .
++          file: ./Dockerfile
++          platforms: linux/amd64,linux/arm64
++          push: true
++          tags: ${{ steps.meta.outputs.tags }}
++          labels: ${{ steps.meta.outputs.labels }}
+diff --git a/Dockerfile b/Dockerfile
+new file mode 100644
+index 00000000..a41b1222
+--- /dev/null
++++ b/Dockerfile
+@@ -0,0 +1,43 @@
++FROM node:25-bookworm AS ui-build
++
++WORKDIR /src/ui
++
++COPY ui/package.json ui/package-lock.json ./
++COPY ui/dprint.json ./
++COPY ui/dprint-typescript-0.95.15.wasm ./
++COPY ui/index.html ./
++COPY ui/vite.config.js ./
++COPY ui/public ./public
++COPY ui/src ./src
++
++RUN npm ci && npm run build
++
++FROM golang:1.25-bookworm AS build
++
++WORKDIR /src
++
++COPY go.mod go.sum ./
++RUN go mod download
++
++COPY . .
++
++COPY --from=ui-build /src/ui/dist ./ui/dist
++
++ENV CGO_ENABLED=0
++RUN go build -o /out/pocketbase-mysql ./examples/base
++
++FROM debian:bookworm-slim
++
++RUN apt-get update \
++	&& apt-get install -y --no-install-recommends ca-certificates tzdata \
++	&& rm -rf /var/lib/apt/lists/*
++
++WORKDIR /app
++
++COPY --from=build /out/pocketbase-mysql /app/pocketbase-mysql
++
++EXPOSE 8090
++VOLUME ["/pb_data"]
++
++ENTRYPOINT ["/app/pocketbase-mysql"]
++CMD ["serve", "--dir", "/pb_data", "--http", "0.0.0.0:8090"]
+diff --git a/README.md b/README.md
+index eaf33c72..96e949b6 100644
+--- a/README.md
++++ b/README.md
+@@ -90,6 +90,60 @@ CI behavior in this fork:
+ - branch/PR pushes run `.github/workflows/build-pocketbase-mysql.yaml` and upload build artifacts to the Actions run
+ - tag pushes matching `v*` run `.github/workflows/release-pocketbase-mysql.yaml` and attach binaries to GitHub Releases
+ 
++## Container Image
++
++This fork uses an app-only container image. It does **not** extend the official MySQL image.
++
++Why:
++
++- PocketBase and MySQL should remain separate services.
++- the app can connect to managed MySQL or any external MySQL deployment.
++- container lifecycle stays simple: one container, one primary process.
++
++Files:
++
++- `Dockerfile` - multi-stage build for `pocketbase-mysql`
++- `.dockerignore` - keeps the build context small
++- `docker-compose.mysql.yml` - example app + MySQL composition
++
++Build locally:
++
++```sh
++docker build -t pocketbase-mysql:local .
++```
++
++Run the image directly:
++
++```sh
++docker run --rm -p 8090:8090 \
++  -e PB_DATABASE_DRIVER=mysql \
++  -e PB_DATABASE_DSN='root:pbpass@tcp(host.docker.internal:3306)/pocketbase?parseTime=true&multiStatements=true' \
++  pocketbase-mysql:local
++```
++
++Run with the example compose stack:
++
++```sh
++docker compose -f docker-compose.mysql.yml up --build
++```
++
++The app container stores PocketBase runtime data in `/pb_data`.
++
++## GHCR Publishing
++
++This fork now publishes an OCI image to GHCR via `.github/workflows/publish-ghcr.yaml`.
++
++Publish behavior:
++
++- push to `mysql/main` -> push `ghcr.io/fadlee/pocketbase-mysql:mysql-main`
++- default branch builds can also carry `latest` when `mysql/main` is the repo default branch
++- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.38.0-mysql.1`
++
++The workflow builds multi-arch images for:
++
++- `linux/amd64`
++- `linux/arm64`
++
+ Example release flow:
+ 
+ ```sh
+diff --git a/docker-compose.mysql.yml b/docker-compose.mysql.yml
+new file mode 100644
+index 00000000..fd333eca
+--- /dev/null
++++ b/docker-compose.mysql.yml
+@@ -0,0 +1,33 @@
++services:
++  mysql:
++    image: mysql:8.4
++    environment:
++      MYSQL_ROOT_PASSWORD: pbpass
++      MYSQL_DATABASE: pocketbase
++    ports:
++      - "3307:3306"
++    volumes:
++      - mysql-data:/var/lib/mysql
++    healthcheck:
++      test: ["CMD", "mysql", "-h127.0.0.1", "-uroot", "-ppbpass", "-e", "SELECT 1"]
++      interval: 10s
++      timeout: 5s
++      retries: 12
++
++  pocketbase-mysql:
++    build:
++      context: .
++    environment:
++      PB_DATABASE_DRIVER: mysql
++      PB_DATABASE_DSN: root:pbpass@tcp(mysql:3306)/pocketbase?parseTime=true&multiStatements=true
++    depends_on:
++      mysql:
++        condition: service_healthy
++    ports:
++      - "8090:8090"
++    volumes:
++      - pocketbase-data:/pb_data
++
++volumes:
++  mysql-data:
++  pocketbase-data:
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 05010ca7..1e47df04 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -103,6 +103,29 @@ Run it with:
+ ./pocketbase-mysql serve
+ ```
+ 
++## Container Output
++
++This fork also supports an app-only container image build.
++
++Local image build:
++
++```sh
++docker build -t pocketbase-mysql:local .
++```
++
++Example local stack:
++
++```sh
++docker compose -f docker-compose.mysql.yml up --build
++```
++
++GitHub container publishing:
++
++- `.github/workflows/publish-ghcr.yaml`
++- publishes to `ghcr.io/fadlee/pocketbase-mysql`
++- branch push on `mysql/main` publishes the rolling branch image
++- tag push `v*` publishes versioned image tags
++
+ ## Refactor Boundaries
+ 
+ Keep MySQL-specific code behind small seams where possible:
+-- 
+2.54.0.windows.1
+

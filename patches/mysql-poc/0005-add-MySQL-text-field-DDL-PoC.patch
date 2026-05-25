@@ -1,0 +1,109 @@
+From f6e4b84a62383546565af557b58ede1cc54abb91 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 9 May 2026 23:56:43 +0700
+Subject: [PATCH 05/32] add MySQL text field DDL PoC
+
+---
+ core/field.go              | 11 +++++++++++
+ core/field_autodate.go     |  4 ++++
+ core/field_text.go         | 12 ++++++++++++
+ docs/mysql-gap-analysis.md | 19 +++++++++++++++++++
+ 4 files changed, 46 insertions(+)
+
+diff --git a/core/field.go b/core/field.go
+index 0ccf78ba..b8bc8363 100644
+--- a/core/field.go
++++ b/core/field.go
+@@ -3,6 +3,7 @@ package core
+ import (
+ 	"context"
+ 	"database/sql/driver"
++	"os"
+ 	"regexp"
+ 	"strings"
+ 
+@@ -53,6 +54,16 @@ const (
+ )
+ 
+ // Common field errors.
++
++func isMySQLDataDB(app App) bool {
++	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++		return true
++	}
++
++	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
++	return ok && db.DriverName() == "mysql"
++}
++
+ var (
+ 	ErrUnknownField          = validation.NewError("validation_unknown_field", "Unknown or invalid field.")
+ 	ErrInvalidFieldValue     = validation.NewError("validation_invalid_field_value", "Invalid field value.")
+diff --git a/core/field_autodate.go b/core/field_autodate.go
+index 8239d090..29676f62 100644
+--- a/core/field_autodate.go
++++ b/core/field_autodate.go
+@@ -106,6 +106,10 @@ func (f *AutodateField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *AutodateField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL" // note: sqlite doesn't allow adding new columns with non-constant defaults
+ }
+ 
+diff --git a/core/field_text.go b/core/field_text.go
+index 2a2af532..7c8238fe 100644
+--- a/core/field_text.go
++++ b/core/field_text.go
+@@ -160,6 +160,18 @@ func (f *TextField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *TextField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		if f.PrimaryKey {
++			return "VARCHAR(15) PRIMARY KEY NOT NULL"
++		}
++
++		max := f.Max
++		if max <= 0 {
++			max = 255
++		}
++		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
++	}
++
+ 	if f.PrimaryKey {
+ 		// note: the default is just a last resort fallback to avoid empty
+ 		// string values in case the record was inserted with raw sql and
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index fca0eb09..e000168b 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -190,3 +190,22 @@ Interpretation:
+ - The PoC now passes the hardcoded `_params` and `_collections` startup SQL.
+ - The next blocker is generated collection record table DDL from field `ColumnType` values.
+ - MySQL cannot use `TEXT DEFAULT ''`, so text/autodate field column generation needs dialect-aware types before system collections such as `_mfas` can be created.
++
++## Milestone 2 Text and Autodate Field DDL Result
++
++Generated MySQL record table DDL now uses MySQL-safe column types for text and autodate fields while preserving SQLite defaults.
++
++Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
++
++```text
++CREATE TABLE `_mfas` (`collectionRef` VARCHAR(255) DEFAULT '' NOT NULL, `created` VARCHAR(255) DEFAULT '' NOT NULL, `id` VARCHAR(15) PRIMARY KEY NOT NULL, `method` VARCHAR(255) DEFAULT '' NOT NULL, `recordRef` VARCHAR(255) DEFAULT '' NOT NULL, `updated` VARCHAR(255) DEFAULT '' NOT NULL)
++CREATE INDEX `idx_mfas_collectionRef_recordRef` ON `_mfas` (`collectionRef`, `recordRef`)
++CREATE TABLE `_otps` (... `password` TEXT DEFAULT '' NOT NULL, ...)
++failed to apply migration 1640988000_init.go: _otps error: Error 1101 (42000): BLOB, TEXT, GEOMETRY or JSON column 'password' can't have a default value
++```
++
++Interpretation:
++
++- The `_mfas` system record table can now be created in MySQL.
++- The next blocker is `PasswordField.ColumnType`, which still emits `TEXT DEFAULT '' NOT NULL`.
++- Similar text-backed fields such as email, URL, editor, file/select/relation variants will need the same dialect-aware audit.
+-- 
+2.54.0.windows.1
+

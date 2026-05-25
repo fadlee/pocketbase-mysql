@@ -1,0 +1,178 @@
+From e1c73a56ef5f676ac47416729f8b6242e51e2d55 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 00:03:17 +0700
+Subject: [PATCH 06/32] add MySQL text-backed field DDL PoC
+
+---
+ core/field_date.go         |  4 ++++
+ core/field_editor.go       |  4 ++++
+ core/field_email.go        |  4 ++++
+ core/field_file.go         |  4 ++++
+ core/field_password.go     |  4 ++++
+ core/field_relation.go     |  4 ++++
+ core/field_select.go       |  4 ++++
+ core/field_url.go          |  4 ++++
+ docs/mysql-gap-analysis.md | 30 ++++++++++++++++++++++++++++++
+ 9 files changed, 62 insertions(+)
+
+diff --git a/core/field_date.go b/core/field_date.go
+index 81f2e9d8..0f08b58b 100644
+--- a/core/field_date.go
++++ b/core/field_date.go
+@@ -107,6 +107,10 @@ func (f *DateField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *DateField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_editor.go b/core/field_editor.go
+index 629d6be8..fe951a11 100644
+--- a/core/field_editor.go
++++ b/core/field_editor.go
+@@ -114,6 +114,10 @@ func (f *EditorField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *EditorField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "LONGTEXT NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_email.go b/core/field_email.go
+index a68b0298..90b2ffe0 100644
+--- a/core/field_email.go
++++ b/core/field_email.go
+@@ -110,6 +110,10 @@ func (f *EmailField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *EmailField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_file.go b/core/field_file.go
+index 0e773277..33305008 100644
+--- a/core/field_file.go
++++ b/core/field_file.go
+@@ -195,6 +195,10 @@ func (f *FileField) ColumnType(app App) string {
+ 		return "JSON DEFAULT '[]' NOT NULL"
+ 	}
+ 
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_password.go b/core/field_password.go
+index ed1b1d5d..d906e499 100644
+--- a/core/field_password.go
++++ b/core/field_password.go
+@@ -144,6 +144,10 @@ func (f *PasswordField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *PasswordField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_relation.go b/core/field_relation.go
+index bf75674a..94147290 100644
+--- a/core/field_relation.go
++++ b/core/field_relation.go
+@@ -158,6 +158,10 @@ func (f *RelationField) ColumnType(app App) string {
+ 		return "JSON DEFAULT '[]' NOT NULL"
+ 	}
+ 
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_select.go b/core/field_select.go
+index 8b1c5c9d..2957db46 100644
+--- a/core/field_select.go
++++ b/core/field_select.go
+@@ -145,6 +145,10 @@ func (f *SelectField) ColumnType(app App) string {
+ 		return "JSON DEFAULT '[]' NOT NULL"
+ 	}
+ 
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/core/field_url.go b/core/field_url.go
+index 06d6d856..a3060463 100644
+--- a/core/field_url.go
++++ b/core/field_url.go
+@@ -110,6 +110,10 @@ func (f *URLField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *URLField) ColumnType(app App) string {
++	if isMySQLDataDB(app) {
++		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	}
++
+ 	return "TEXT DEFAULT '' NOT NULL"
+ }
+ 
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index e000168b..ff9a6906 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -209,3 +209,33 @@ Interpretation:
+ - The `_mfas` system record table can now be created in MySQL.
+ - The next blocker is `PasswordField.ColumnType`, which still emits `TEXT DEFAULT '' NOT NULL`.
+ - Similar text-backed fields such as email, URL, editor, file/select/relation variants will need the same dialect-aware audit.
++
++## Milestone 2 Text-Backed Field DDL Result
++
++Additional text-backed field types now use MySQL-safe column definitions while preserving SQLite defaults.
++
++Covered field types:
++
++- `PasswordField`
++- `EmailField`
++- `URLField`
++- `EditorField`
++- `DateField`
++- single-value `FileField`
++- single-value `SelectField`
++- single-value `RelationField`
++
++Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
++
++```text
++CREATE TABLE `_superusers` (... `email` VARCHAR(255) DEFAULT '' NOT NULL, ...)
++CREATE UNIQUE INDEX `idx_tokenKey_pbc_3142635823` ON `_superusers` (`tokenKey`)
++CREATE UNIQUE INDEX `idx_email_pbc_3142635823` ON `_superusers` (`email`) WHERE `email` != ''
++failed to apply migration 1640988000_init.go: _superusers error: indexes: (1: Failed to create index idx_email_pbc_3142635823 - Error 1064 (42000): ... near 'WHERE `email` != ''' at line 1..).
++```
++
++Interpretation:
++
++- MySQL can now create the early system tables through `_superusers` table creation.
++- The next blocker is SQLite-style partial index SQL stored in collection index definitions.
++- MySQL needs dialect-aware index generation or index normalization, starting with filtered unique indexes such as `WHERE email != ''`.
+-- 
+2.54.0.windows.1
+

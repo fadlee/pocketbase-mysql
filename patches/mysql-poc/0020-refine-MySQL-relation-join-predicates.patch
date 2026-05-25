@@ -1,0 +1,44 @@
+From a148ee50167654fd2e88ec84fedc8aacc11500a5 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 02:52:44 +0700
+Subject: [PATCH 20/32] refine MySQL relation join predicates
+
+---
+ core/record_field_resolver_runner.go | 10 ++++++----
+ 1 file changed, 6 insertions(+), 4 deletions(-)
+
+diff --git a/core/record_field_resolver_runner.go b/core/record_field_resolver_runner.go
+index c3869e80..b2863c46 100644
+--- a/core/record_field_resolver_runner.go
++++ b/core/record_field_resolver_runner.go
+@@ -585,10 +585,11 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 					on = dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias+"."+cleanBackFieldName+"]]", "[["+r.activeTableAlias+".id]]"))
+ 				} else {
+ 					on = dbx.NewExp(fmt.Sprintf(
+-						"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
++						"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
++						r.activeTableAlias,
++						jeAlias,
+ 						dbutils.JSONEach(newTableAlias+"."+cleanBackFieldName),
+ 						jeAlias,
+-						relationValueEquals(r.resolver, "[["+r.activeTableAlias+".id]]", "[["+jeAlias+".value]]"),
+ 					))
+ 				}
+ 
+@@ -637,10 +638,11 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 							}
+ 
+ 							return dbx.NewExp(fmt.Sprintf(
+-								"EXISTS (SELECT 1 FROM %s {{%s}} WHERE %s)",
++								"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
++								r.multiMatchActiveTableAlias,
++								jeAlias2,
+ 								dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
+ 								jeAlias2,
+-								relationValueEquals(r.resolver, "[["+r.multiMatchActiveTableAlias+".id]]", "[["+jeAlias2+".value]]"),
+ 							))
+ 						}(),
+ 					},
+-- 
+2.54.0.windows.1
+

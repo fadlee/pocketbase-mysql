@@ -1,0 +1,75 @@
+From 99410d1049701a5b030111f643522de1572ab5bd Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 9 May 2026 23:41:00 +0700
+Subject: [PATCH 03/32] fix MySQL migration metadata timestamp type
+
+---
+ core/migrations_runner.go  | 11 ++++++++++-
+ docs/mysql-gap-analysis.md | 24 ++++++++++++++++++++++++
+ 2 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/core/migrations_runner.go b/core/migrations_runner.go
+index 9b0ff76a..0caff635 100644
+--- a/core/migrations_runner.go
++++ b/core/migrations_runner.go
+@@ -249,8 +249,9 @@ func (r *MigrationsRunner) initMigrationsTable() error {
+ 	}
+ 
+ 	rawQuery := fmt.Sprintf(
+-		"CREATE TABLE IF NOT EXISTS {{%s}} (file VARCHAR(255) PRIMARY KEY NOT NULL, applied INTEGER NOT NULL)",
++		"CREATE TABLE IF NOT EXISTS {{%s}} (file VARCHAR(255) PRIMARY KEY NOT NULL, applied %s NOT NULL)",
+ 		r.tableName,
++		migrationAppliedColumnType(r.app),
+ 	)
+ 
+ 	_, err := r.app.DB().NewQuery(rawQuery).Execute()
+@@ -262,6 +263,14 @@ func (r *MigrationsRunner) initMigrationsTable() error {
+ 	return err
+ }
+ 
++func migrationAppliedColumnType(app App) string {
++	if db, ok := app.ConcurrentDB().(interface{ DriverName() string }); ok && db.DriverName() == "mysql" {
++		return "BIGINT"
++	}
++
++	return "INTEGER"
++}
++
+ func (r *MigrationsRunner) isMigrationApplied(txApp App, file string) bool {
+ 	var exists int
+ 
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index 40efaac0..dd1e0a1c 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -141,3 +141,27 @@ Interpretation:
+ - The driver/DSN path is not the blocker.
+ - The next blocker is schema type generation for system migration metadata: SQLite `INTEGER` accepted the microtimestamp, but MySQL `INTEGER` is too small.
+ - The next implementation target should be dialect-aware system table column types, starting with migration metadata before broader collection schema work.
++
++## Milestone 2 Migration Metadata Fix Result
++
++The first PoC blocker was addressed by making the migration metadata `applied` column use `BIGINT` when the active data DB driver is MySQL. SQLite keeps the previous `INTEGER` type.
++
++Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
++
++```text
++CREATE TABLE IF NOT EXISTS `_migrations` (file VARCHAR(255) PRIMARY KEY NOT NULL, applied BIGINT NOT NULL)
++INSERT INTO `_migrations` (`applied`, `file`) VALUES (1778344809419336, '1640988000_aux_init.go')
++CREATE TABLE `_params` (
++    `id`      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
++    `value`   JSON DEFAULT NULL,
++    `created` TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
++    `updated` TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
++);
++failed to apply migration 1640988000_init.go: _params exec error: Error 3770 (HY000): Default value expression of column 'id' contains a disallowed function: `randomblob`.
++```
++
++Interpretation:
++
++- Migration metadata can now be recorded in MySQL.
++- The next blocker is the initial system schema migration, starting with `_params`.
++- MySQL needs dialect-specific replacements for SQLite defaults such as `randomblob(...)` ID generation and `strftime(...)` timestamp defaults.
+-- 
+2.54.0.windows.1
+

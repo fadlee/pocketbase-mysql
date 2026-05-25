@@ -1,0 +1,139 @@
+From 8ada15b5b2f68a5d2354f6b0f2adc8b3e1b2a387 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 00:55:17 +0700
+Subject: [PATCH 13/32] fix MySQL LIKE filter escaping
+
+---
+ core/record_field_resolver.go |  8 ++++++++
+ docs/mysql-gap-analysis.md    | 20 ++++++++++++++++++++
+ tools/search/filter.go        | 26 +++++++++++++++++++-------
+ 3 files changed, 47 insertions(+), 7 deletions(-)
+
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index dca38dad..dd5bbbc1 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -81,6 +81,14 @@ func (r *RecordFieldResolver) SetAllowHiddenFields(allowHiddenFields bool) {
+ 	r.allowHiddenFields = allowHiddenFields
+ }
+ 
++func (r *RecordFieldResolver) LikeEscapeClause() string {
++	if isMySQLDataDB(r.app) {
++		return " ESCAPE '\\\\'"
++	}
++
++	return " ESCAPE '\\'"
++}
++
+ // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
+ func NewRecordFieldResolver(
+ 	app App,
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index 0d5aec78..a4253486 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -357,3 +357,23 @@ CREATE INDEX `idx_qa_introspection_title` ON `qa_introspection` (`title`)
+ ```
+ 
+ The collection creation log now shows `information_schema.TABLES` and `information_schema.STATISTICS` for data DB metadata lookups instead of `sqlite_schema` and `sqlite_master`.
++
++## Runtime QA LIKE Filter Result
++
++Basic text filtering exposed the next runtime blocker:
++
++```text
++GET /api/collections/qa_introspection/records?filter=title~"intro" -> 400
++Error 1064 (42000): ... near ''\' LIMIT 30'
++SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\'
++```
++
++MySQL requires the backslash escape character to be escaped in the generated SQL string literal. The record field resolver now provides a MySQL-specific `LIKE` escape clause while the generic search resolver keeps the existing SQLite clause.
++
++Manual QA after restart now passes:
++
++```text
++GET /api/collections/qa_introspection/records?filter=title~"intro" -> 200
++SELECT ... WHERE `qa_introspection`.`title` LIKE '%intro%' ESCAPE '\\'
++{"totalItems":1,"totalPages":1}
++```
+diff --git a/tools/search/filter.go b/tools/search/filter.go
+index 8df74a95..7d655ce2 100644
+--- a/tools/search/filter.go
++++ b/tools/search/filter.go
+@@ -14,6 +14,8 @@ import (
+ 	"github.com/spf13/cast"
+ )
+ 
++const defaultLikeEscapeClause = " ESCAPE '\\'"
++
+ // FilterData is a filter expression string following the `fexpr` package grammar.
+ //
+ // The filter string can also contain dbx placeholder parameters (eg. "title = {:name}"),
+@@ -163,13 +165,22 @@ func resolveTokenizedExpr(expr fexpr.Expr, fieldResolver FieldResolver) (dbx.Exp
+ 		return nil, fmt.Errorf("invalid right operand %q - %v", expr.Right.Literal, rErr)
+ 	}
+ 
+-	return buildResolversExpr(lResult, expr.Op, rResult)
++	return buildResolversExpr(lResult, expr.Op, rResult, likeEscapeClause(fieldResolver))
++}
++
++func likeEscapeClause(fieldResolver FieldResolver) string {
++	if r, ok := fieldResolver.(interface{ LikeEscapeClause() string }); ok {
++		return r.LikeEscapeClause()
++	}
++
++	return defaultLikeEscapeClause
+ }
+ 
+ func buildResolversExpr(
+ 	left *ResolverResult,
+ 	op fexpr.SignOp,
+ 	right *ResolverResult,
++	likeEscape string,
+ ) (dbx.Expression, error) {
+ 	var expr dbx.Expression
+ 
+@@ -181,16 +192,16 @@ func buildResolversExpr(
+ 	case fexpr.SignLike, fexpr.SignAnyLike:
+ 		// the right side is a column and therefor wrap it with "%" for contains like behavior
+ 		if len(right.Params) == 0 {
+-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%') ESCAPE '\\'", left.Identifier, right.Identifier), left.Params)
++			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
+ 		} else {
+-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s ESCAPE '\\'", left.Identifier, right.Identifier), mergeParams(left.Params, wrapLikeParams(right.Params)))
++			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+ 		}
+ 	case fexpr.SignNlike, fexpr.SignAnyNlike:
+ 		// the right side is a column and therefor wrap it with "%" for not-contains like behavior
+ 		if len(right.Params) == 0 {
+-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%') ESCAPE '\\'", left.Identifier, right.Identifier), left.Params)
++			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
+ 		} else {
+-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s ESCAPE '\\'", left.Identifier, right.Identifier), mergeParams(left.Params, wrapLikeParams(right.Params)))
++			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+ 		}
+ 	case fexpr.SignLt, fexpr.SignAnyLt:
+ 		expr = dbx.NewExp(fmt.Sprintf("%s < %s", left.Identifier, right.Identifier), mergeParams(left.Params, right.Params))
+@@ -650,6 +661,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 			// doesn't matter whether it is applied on the left or right subquery operand
+ 			AfterBuild: dbx.Not, // inverse for the not-exist expression
+ 		},
++		defaultLikeEscapeClause,
+ 	)
+ 
+ 	if buildErr != nil {
+@@ -708,9 +720,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 	var buildErr error
+ 
+ 	if e.inverse {
+-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1)
++		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause)
+ 	} else {
+-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2)
++		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause)
+ 	}
+ 
+ 	if buildErr != nil {
+-- 
+2.54.0.windows.1
+

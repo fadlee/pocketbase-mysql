@@ -1,0 +1,370 @@
+From 378b66a07ee2bf1c717d66a333a8dada188d2260 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sun, 10 May 2026 02:04:51 +0700
+Subject: [PATCH 17/32] fix MySQL schema update matrix
+
+---
+ core/collection_record_table_sync.go | 179 +++++++++++++++++++++------
+ docs/mysql-gap-analysis.md           |  12 ++
+ docs/mysql-upstream-workflow.md      |   2 +-
+ scripts/mysql-runtime-qa.sh          |  64 ++++++++++
+ 4 files changed, 216 insertions(+), 41 deletions(-)
+
+diff --git a/core/collection_record_table_sync.go b/core/collection_record_table_sync.go
+index 3c7e6265..aa6c8b15 100644
+--- a/core/collection_record_table_sync.go
++++ b/core/collection_record_table_sync.go
+@@ -26,7 +26,7 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 	txErr := app.RunInTransaction(func(txApp App) error {
+ 		// create
+ 		// -----------------------------------------------------------
+-		if oldCollection == nil || !app.HasTable(oldCollection.Name) {
++		if oldCollection == nil || !recordTableExistsForSchemaSync(app, txApp, oldCollection.Name) {
+ 			tableName := newCollection.Name
+ 
+ 			fields := newCollection.Fields
+@@ -101,6 +101,20 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 
+ 				continue
+ 			}
++			if oldField != nil && oldField.GetName() != field.GetName() && isMySQLDataDB(txApp) {
++				_, err := txApp.DB().NewQuery(fmt.Sprintf(
++					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
++					newTableName,
++					oldField.GetName(),
++					field.GetName(),
++					field.ColumnType(txApp),
++				)).Execute()
++				if err != nil {
++					return fmt.Errorf("failed to rename column %s - %w", oldField.GetName(), err)
++				}
++
++				continue
++			}
+ 
+ 			// Note:
+ 			// We are using a temporary column name when adding or renaming columns
+@@ -163,6 +177,24 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 	return nil
+ }
+ 
++func recordTableExistsForSchemaSync(app App, txApp App, tableName string) bool {
++	if !isMySQLDataDB(txApp) {
++		return app.HasTable(tableName)
++	}
++
++	var exists int
++	err := txApp.DB().NewQuery(`
++		SELECT 1
++		FROM information_schema.TABLES
++		WHERE TABLE_SCHEMA = DATABASE()
++			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
++			AND LOWER(TABLE_NAME) = LOWER({:tableName})
++		LIMIT 1
++	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
++
++	return err == nil && exists > 0
++}
++
+ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, oldCollection *Collection) error {
+ 	if newCollection.IsView() || oldCollection == nil {
+ 		return nil // view or not an update
+@@ -170,10 +202,12 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 
+ 	return app.RunInTransaction(func(txApp App) error {
+ 		for _, newField := range newCollection.Fields {
++			oldField := oldCollection.Fields.GetById(newField.GetId())
++
+ 			// allow to continue even if there is no old field for the cases
+ 			// when a new field is added and there are already inserted data
+ 			var isOldMultiple bool
+-			if oldField := oldCollection.Fields.GetById(newField.GetId()); oldField != nil {
++			if oldField != nil {
+ 				if mv, ok := oldField.(MultiValuer); ok {
+ 					isOldMultiple = mv.IsMultiple()
+ 				}
+@@ -198,11 +232,19 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 				Name string `db:"name"`
+ 				SQL  string `db:"sql"`
+ 			}{}
+-			err := txApp.DB().Select("name", "sql").
+-				From("sqlite_master").
+-				AndWhere(dbx.NewExp("sql is not null")).
+-				AndWhere(dbx.HashExp{"type": "view"}).
+-				All(&views)
++			var err error
++			if isMySQLDataDB(txApp) {
++				err = txApp.DB().Select("TABLE_NAME AS name", "VIEW_DEFINITION AS sql").
++					From("information_schema.VIEWS").
++					AndWhere(dbx.NewExp("TABLE_SCHEMA = DATABASE()")).
++					All(&views)
++			} else {
++				err = txApp.DB().Select("name", "sql").
++					From("sqlite_master").
++					AndWhere(dbx.NewExp("sql is not null")).
++					AndWhere(dbx.HashExp{"type": "view"}).
++					All(&views)
++			}
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -217,7 +259,17 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 			oldTempName := "_" + newField.GetName() + security.PseudorandomString(5)
+ 
+ 			// rename temporary the original column to something else to allow inserting a new one in its place
+-			_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
++			if isMySQLDataDB(txApp) {
++				_, err = txApp.DB().NewQuery(fmt.Sprintf(
++					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
++					newCollection.Name,
++					originalName,
++					oldTempName,
++					oldField.ColumnType(txApp),
++				)).Execute()
++			} else {
++				_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
++			}
+ 			if err != nil {
+ 				return err
+ 			}
+@@ -232,8 +284,32 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 
+ 			if !isOldMultiple && isNewMultiple {
+ 				// single -> multiple (convert to array)
+-				copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+-					`UPDATE {{%s}} set [[%s]] = (
++				if isMySQLDataDB(txApp) {
++					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
++						`UPDATE {{%s}} set [[%s]] = (
++							CASE
++								WHEN COALESCE([[%s]], '') = ''
++								THEN JSON_ARRAY()
++								ELSE (
++									CASE
++										WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
++										THEN [[%s]]
++										ELSE JSON_ARRAY([[%s]])
++									END
++								)
++							END
++						)`,
++						newCollection.Name,
++						originalName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++					))
++				} else {
++					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
++						`UPDATE {{%s}} set [[%s]] = (
+ 							CASE
+ 								WHEN COALESCE([[%s]], '') = ''
+ 								THEN '[]'
+@@ -246,41 +322,64 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 								)
+ 							END
+ 						)`,
+-					newCollection.Name,
+-					originalName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-				))
++						newCollection.Name,
++						originalName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++					))
++				}
+ 			} else {
+ 				// multiple -> single (keep only the last element)
+ 				//
+ 				// note: for file fields the actual file objects are not
+ 				// deleted allowing additional custom handling via migration
+-				copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+-					`UPDATE {{%s}} set [[%s]] = (
+-						CASE
+-							WHEN COALESCE([[%s]], '[]') = '[]'
+-							THEN ''
+-							ELSE (
+-								CASE
+-									WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
+-									THEN COALESCE(json_extract([[%s]], '$[#-1]'), '')
+-									ELSE [[%s]]
+-								END
+-							)
+-						END
+-					)`,
+-					newCollection.Name,
+-					originalName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-					oldTempName,
+-				))
++				if isMySQLDataDB(txApp) {
++					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
++						`UPDATE {{%s}} set [[%s]] = (
++							CASE
++								WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
++								THEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT([[%s]], CONCAT('$[', JSON_LENGTH([[%s]]) - 1, ']'))), '')
++								WHEN COALESCE([[%s]], '') = ''
++								THEN ''
++								ELSE [[%s]]
++							END
++						)`,
++						newCollection.Name,
++						originalName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++					))
++				} else {
++					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
++						`UPDATE {{%s}} set [[%s]] = (
++							CASE
++								WHEN COALESCE([[%s]], '[]') = '[]'
++								THEN ''
++								ELSE (
++									CASE
++										WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
++										THEN COALESCE(json_extract([[%s]], '$[#-1]'), '')
++										ELSE [[%s]]
++									END
++								)
++							END
++						)`,
++						newCollection.Name,
++						originalName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++						oldTempName,
++					))
++				}
+ 			}
+ 
+ 			// copy the normalized values
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index c43c228d..f169b129 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -409,3 +409,15 @@ POST /api/collections qa_multi_select with tags maxSelect=3 -> 200
+ POST /api/collections/qa_multi_select/records with tags ["alpha","beta"] -> 200
+ GET /api/collections/qa_multi_select/records?filter=tags~"alpha" -> 200
+ ```
++
++The remaining schema update matrix cases also now pass on MySQL:
++
++```text
++PATCH rename status -> state -> 200
++PATCH delete title -> 200
++PATCH single select -> multi select -> 200
++POST /api/collections/qa_matrix/records with state ["draft","published"] -> 200
++GET /api/collections/qa_matrix/records?filter=state~"draft" -> 200
++PATCH multi select -> single select -> 200
++GET /api/collections/qa_matrix/records?filter=state="published" -> 200
++```
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 842c993f..fa4a6d4e 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -52,7 +52,7 @@ scripts/export-mysql-patches.sh <new-base-ref>
+ 
+ ## MySQL QA Script
+ 
+-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, updates a collection schema with a select field, and verifies single/multiple select record behavior.
++`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), and verifies single/multiple select record behavior.
+ 
+ Requirements:
+ 
+diff --git a/scripts/mysql-runtime-qa.sh b/scripts/mysql-runtime-qa.sh
+index 60b30026..c8a1d06e 100755
+--- a/scripts/mysql-runtime-qa.sh
++++ b/scripts/mysql-runtime-qa.sh
+@@ -128,6 +128,70 @@ curl -sS -f -X POST "$base_url/api/collections/qa_multi_select/records" \
+ curl -sS -f "$base_url/api/collections/qa_multi_select/records?filter=tags~%22alpha%22" \
+ 	> "$tmp_dir/filter_multi_select_records.json"
+ 
++matrix_id="$(jq -r '.id' "$tmp_dir/create_multi_select_collection.json")"
++curl -sS -f -X POST "$base_url/api/collections" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data '{"name":"qa_matrix","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}]}' \
++	> "$tmp_dir/create_matrix_collection.json"
++
++matrix_id="$(jq -r '.id' "$tmp_dir/create_matrix_collection.json")"
++
++curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"title":"before matrix","status":"draft"}' \
++	> "$tmp_dir/create_matrix_record.json"
++
++jq '(.fields[] | select(.name == "status") | .name) = "state" | {fields:.fields}' \
++	"$tmp_dir/create_matrix_collection.json" > "$tmp_dir/matrix_rename_payload.json"
++
++curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data @"$tmp_dir/matrix_rename_payload.json" \
++	> "$tmp_dir/matrix_rename_result.json"
++sleep 1
++
++jq '.fields |= map(select(.name != "title")) | {fields:.fields}' \
++	"$tmp_dir/matrix_rename_result.json" > "$tmp_dir/matrix_delete_payload.json"
++
++curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data @"$tmp_dir/matrix_delete_payload.json" \
++	> "$tmp_dir/matrix_delete_result.json"
++sleep 1
++
++jq '(.fields[] | select(.name == "state") | .maxSelect) = 3 | (.fields[] | select(.name == "state") | .values) = ["draft","published","archived"] | {fields:.fields}' \
++	"$tmp_dir/matrix_delete_result.json" > "$tmp_dir/matrix_single_to_multi_payload.json"
++
++curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data @"$tmp_dir/matrix_single_to_multi_payload.json" \
++	> "$tmp_dir/matrix_single_to_multi_result.json"
++sleep 1
++
++curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
++	-H 'Content-Type: application/json' \
++	--data '{"state":["draft","published"]}' \
++	> "$tmp_dir/create_matrix_multi_record.json"
++
++curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state~%22draft%22" \
++	> "$tmp_dir/filter_matrix_multi_records.json"
++
++jq '(.fields[] | select(.name == "state") | .maxSelect) = 1 | {fields:.fields}' \
++	"$tmp_dir/matrix_single_to_multi_result.json" > "$tmp_dir/matrix_multi_to_single_payload.json"
++
++curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
++	-H "Authorization: Bearer ${token}" \
++	-H 'Content-Type: application/json' \
++	--data @"$tmp_dir/matrix_multi_to_single_payload.json" \
++	> "$tmp_dir/matrix_multi_to_single_result.json"
++
++curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state=%22published%22" \
++	> "$tmp_dir/filter_matrix_single_records.json"
++
+ if grep -q "ERROR" "$tmp_dir/pb.log"; then
+ 	echo "Runtime QA completed but server log contains ERROR entries:" >&2
+ 	grep "ERROR" "$tmp_dir/pb.log" >&2
+-- 
+2.54.0.windows.1
+
