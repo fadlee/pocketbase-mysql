@@ -1,7 +1,7 @@
 From e761efccc806139250e3fc50d76bd6be9c7226e1 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 21:11:13 +0700
-Subject: [PATCH 30/35] Add MySQL rowid fallbacks
+Subject: [PATCH 30/40] Add MySQL rowid fallbacks
 
 ---
  tools/search/sort.go                    | 10 ++++++++++

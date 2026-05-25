@@ -1,7 +1,7 @@
 From fdb7b46a1364d194c9a250c5de483f4f4dc74e5d Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 21:25:26 +0700
-Subject: [PATCH 32/35] Update docs baseline references from v0.38.0 to v0.38.2
+Subject: [PATCH 32/40] Update docs baseline references from v0.38.0 to v0.38.2
 
 ---
  README.md                       |  6 +++---

@@ -1,7 +1,7 @@
 From c96230d0f66bbe126e28d5bb6d853a7aced0260e Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 01:11:43 +0700
-Subject: [PATCH 15/35] add MySQL patch workflow tooling
+Subject: [PATCH 15/40] add MySQL patch workflow tooling
 
 ---
  docs/mysql-gap-analysis.md      |   2 +-

@@ -1,7 +1,7 @@
 From 2d3827cb180a40baaffe8c74140d25b9cca0fba2 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 02:58:32 +0700
-Subject: [PATCH 21/35] document fork build output
+Subject: [PATCH 21/40] document fork build output
 
 ---
  Makefile                        |  3 +++

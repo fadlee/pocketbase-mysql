@@ -1,0 +1,32 @@
+From d68e2607bfa51f2d22eca9f85dfa9cbc83ca7eac Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 22:00:36 +0700
+Subject: [PATCH 39/40] Package release binaries as zip archives
+
+---
+ .github/workflows/release-pocketbase-mysql.yaml | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/release-pocketbase-mysql.yaml b/.github/workflows/release-pocketbase-mysql.yaml
+index d90f8c7a..ce60762d 100644
+--- a/.github/workflows/release-pocketbase-mysql.yaml
++++ b/.github/workflows/release-pocketbase-mysql.yaml
+@@ -54,8 +54,13 @@ jobs:
+       - name: Package release asset
+         shell: bash
+         run: |
+-          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.binary_suffix }}"
+-          mv "pocketbase-mysql${{ matrix.binary_suffix }}" "$asset_name"
++          binary_name="pocketbase-mysql${{ matrix.binary_suffix }}"
++          asset_name="pocketbase-mysql-${{ matrix.goos }}-${{ matrix.goarch }}.zip"
++          if command -v zip &>/dev/null; then
++            zip "$asset_name" "$binary_name"
++          else
++            7z a "$asset_name" "$binary_name"
++          fi
+           echo "ASSET_NAME=$asset_name" >> "$GITHUB_ENV"
+ 
+       - name: Upload release asset
+-- 
+2.54.0.windows.1
+

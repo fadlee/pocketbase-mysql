@@ -1,7 +1,7 @@
 From 403fbdafb2a87b5f82d53d3a2c0355f566a32c42 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:31:41 +0700
-Subject: [PATCH 01/35] document initial MySQL gap analysis
+Subject: [PATCH 01/40] document initial MySQL gap analysis
 
 ---
  docs/mysql-gap-analysis.md | 116 +++++++++++++++++++++++++++++++++++++

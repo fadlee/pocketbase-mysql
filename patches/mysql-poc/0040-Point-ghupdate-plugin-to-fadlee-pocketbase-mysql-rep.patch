@@ -1,0 +1,29 @@
+From 5e2657f8f7a4f525f4acf53f2ad777234ce8b662 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 22:03:41 +0700
+Subject: [PATCH 40/40] Point ghupdate plugin to fadlee/pocketbase-mysql repo
+
+---
+ examples/base/main.go | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/examples/base/main.go b/examples/base/main.go
+index 1ea529b4..894b1772 100644
+--- a/examples/base/main.go
++++ b/examples/base/main.go
+@@ -101,7 +101,11 @@ func main() {
+ 	})
+ 
+ 	// GitHub selfupdate
+-	ghupdate.MustRegister(app, app.RootCmd, ghupdate.Config{})
++	ghupdate.MustRegister(app, app.RootCmd, ghupdate.Config{
++		Owner:             "fadlee",
++		Repo:              "pocketbase-mysql",
++		ArchiveExecutable: "pocketbase-mysql",
++	})
+ 
+ 	// static route to serves files from the provided public dir
+ 	// (if publicDir exists and the route path is not already defined)
+-- 
+2.54.0.windows.1
+
