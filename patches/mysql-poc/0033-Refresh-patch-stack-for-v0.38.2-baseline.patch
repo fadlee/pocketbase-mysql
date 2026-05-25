@@ -1,7 +1,7 @@
 From 4ced9db94994ec6d0ce93572bf561d63f3f7ff12 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 21:25:39 +0700
-Subject: [PATCH 33/35] Refresh patch stack for v0.38.2 baseline
+Subject: [PATCH 33/40] Refresh patch stack for v0.38.2 baseline
 
 ---
  ...-document-initial-MySQL-gap-analysis.patch | 135 +++++++

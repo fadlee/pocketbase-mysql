@@ -1,7 +1,7 @@
 From e5be6671822d2741b802de461137fe69e6001d00 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 03:02:33 +0700
-Subject: [PATCH 22/35] add binary build workflow
+Subject: [PATCH 22/40] add binary build workflow
 
 ---
  .github/workflows/build-pocketbase-mysql.yaml | 57 +++++++++++++++++++
