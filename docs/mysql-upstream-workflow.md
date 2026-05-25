@@ -10,25 +10,31 @@ Export the current MySQL patch stack:
 scripts/export-mysql-patches.sh
 ```
 
-By default the script exports commits after `7829cb3b`, the imported PocketBase v0.38.0 baseline commit in this repository. Override the base when needed:
+By default the script exports commits after the upstream baseline tag. For the v0.38.2 upgrade, the base ref is `v0.38.2`:
 
 ```sh
-scripts/export-mysql-patches.sh <base-ref>
+node scripts/export-mysql-patches.mjs v0.38.2
+```
+
+For older branches based on v0.38.1, use:
+
+```sh
+node scripts/export-mysql-patches.mjs v0.38.1
 ```
 
 Apply an exported stack to a clean worktree:
 
 ```sh
-scripts/apply-mysql-patches.sh patches/mysql-poc
+node scripts/apply-mysql-patches.mjs patches/mysql-poc
 ```
 
-The apply script refuses to run on a dirty worktree and uses `git am`, so patch metadata and commit boundaries remain intact.
+The apply script refuses to run on a dirty worktree (ignoring untracked files) and uses `git am --3way`, so patch metadata and commit boundaries remain intact.
 
 ## Upstream Update Checklist
 
 1. Fetch upstream and choose the new PocketBase baseline commit or tag.
 2. Create a new branch from that upstream baseline.
-3. Apply the MySQL patch stack with `scripts/apply-mysql-patches.sh`.
+3. Apply the MySQL patch stack with `node scripts/apply-mysql-patches.mjs`.
 4. Resolve conflicts one patch at a time, preserving commit boundaries when practical.
 5. Run the SQLite baseline checks:
 
@@ -40,19 +46,19 @@ go test ./...
 6. Run the MySQL PoC runtime check:
 
 ```sh
-scripts/mysql-runtime-qa.sh
+node scripts/mysql-runtime-qa.mjs
 ```
 
 7. Update `docs/mysql-gap-analysis.md` with any new upstream drift, blocker, or verified behavior.
 8. Export a fresh patch stack after the branch is clean:
 
 ```sh
-scripts/export-mysql-patches.sh <new-base-ref>
+node scripts/export-mysql-patches.mjs <new-base-ref>
 ```
 
 ## MySQL QA Script
 
-`scripts/mysql-runtime-qa.sh` starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
+`scripts/mysql-runtime-qa.mjs` (Node.js wrapper around `scripts/mysql_runtime_qa.py`) starts a disposable MySQL 8.4 container, boots PocketBase with `PB_DATABASE_DRIVER=mysql`, creates a superuser, exercises collection/record CRUD, checks sorted record listing, checks a text `LIKE` filter, runs the schema update matrix for select fields (rename, delete, single->multi, multi->single), verifies relation-many create/filter/expand, and verifies a simple view collection create/list/filter/update flow.
 
 Requirements:
 
