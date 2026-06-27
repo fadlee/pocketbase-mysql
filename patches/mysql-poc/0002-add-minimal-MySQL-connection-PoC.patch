@@ -1,7 +1,7 @@
-From 55ef4e1e1ade3bdfb5dedd862df7e96408a683d3 Mon Sep 17 00:00:00 2001
+From af7ad2f3831a3211633436162328b8c68bc26704 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:36:08 +0700
-Subject: [PATCH 02/40] add minimal MySQL connection PoC
+Subject: [PATCH 02/46] add minimal MySQL connection PoC
 
 ---
  core/db_connect.go         | 20 ++++++++++++++++++++
@@ -81,7 +81,7 @@ index 5bbbfd31..40efaac0 100644
 +- The next blocker is schema type generation for system migration metadata: SQLite `INTEGER` accepted the microtimestamp, but MySQL `INTEGER` is too small.
 +- The next implementation target should be dialect-aware system table column types, starting with migration metadata before broader collection schema work.
 diff --git a/go.mod b/go.mod
-index d72f823f..9daa4be2 100644
+index c4e1587d..f2915e41 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -12,6 +12,7 @@ require (
@@ -98,7 +98,7 @@ index d72f823f..9daa4be2 100644
  require (
 +	filippo.io/edwards25519 v1.2.0 // indirect
  	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
- 	github.com/dlclark/regexp2 v1.11.5 // indirect
+ 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
  	github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
 -- 
 2.54.0.windows.1

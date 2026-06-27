@@ -1,7 +1,7 @@
-From 4554a87c915e6a32b77dd64c5bd86f39759c12ba Mon Sep 17 00:00:00 2001
+From 47f494a1ac0c94afe9e524aafbcfd95d4cdbed06 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 21:36:49 +0700
-Subject: [PATCH 35/40] Fix MySQL runtime: skip sqlite_master migration, use
+Subject: [PATCH 34/46] Fix MySQL runtime: skip sqlite_master migration, use
  env vars in QA script
 
 ---

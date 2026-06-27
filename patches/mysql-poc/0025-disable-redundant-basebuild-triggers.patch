@@ -1,14 +1,14 @@
-From 7673e21ddb594da39c98a04c1a122538156da8de Mon Sep 17 00:00:00 2001
+From 98b907df046374b044c4fca531878c5c7d56e7bd Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 05:52:57 +0700
-Subject: [PATCH 25/40] disable redundant basebuild triggers
+Subject: [PATCH 25/46] disable redundant basebuild triggers
 
 ---
  .github/workflows/release.yaml | 3 +--
  1 file changed, 1 insertion(+), 2 deletions(-)
 
 diff --git a/.github/workflows/release.yaml b/.github/workflows/release.yaml
-index 81ed0bc3..d3ed6155 100644
+index bf5e6595..5c512b9a 100644
 --- a/.github/workflows/release.yaml
 +++ b/.github/workflows/release.yaml
 @@ -1,8 +1,7 @@

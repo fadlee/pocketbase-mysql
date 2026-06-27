@@ -2,9 +2,9 @@
 
 Generated from:
 
-- Base ref: `v0.38.2` (3616b9d6)
-- Head ref: `mysql/main` (5e2657f8)
-- Date: 2026-05-25
+- Base ref: `v0.39.4` (507ecb26)
+- Head ref: `mysql/rebase-v0.39.4` (bc7c861f)
+- Date: 2026-06-27
 
 Apply to a clean upstream worktree with:
 

@@ -1,7 +1,7 @@
-From e761efccc806139250e3fc50d76bd6be9c7226e1 Mon Sep 17 00:00:00 2001
+From f89cf607b1fcc7214d39a384a2178b07482a0bc0 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 21:11:13 +0700
-Subject: [PATCH 30/40] Add MySQL rowid fallbacks
+Subject: [PATCH 30/46] Add MySQL rowid fallbacks
 
 ---
  tools/search/sort.go                    | 10 ++++++++++
@@ -72,7 +72,7 @@ index 2e9269c8..bd070fdc 100644
  
              data.lastRecordsPage = result.page;
 diff --git a/ui/src/records/recordsList.js b/ui/src/records/recordsList.js
-index abf6aaf4..afd71caf 100644
+index db5dbecd..69925c3d 100644
 --- a/ui/src/records/recordsList.js
 +++ b/ui/src/records/recordsList.js
 @@ -116,8 +116,8 @@ window.app.components.recordsList = function(propsArg = {}) {
@@ -84,8 +84,8 @@ index abf6aaf4..afd71caf 100644
 +                // Prefer a portable fallback so record listing works with both SQLite and MySQL.
 +                normalizedSort = props.collection.type != "view" ? "-created,-id" : undefined;
              } else if (sortField?.type == "relation") {
-                 normalizedSort = app.store.collections
-                     ?.find((c) => c.id == sortField.collectionId)
+                 const sortCollection = app.store.collections?.find((c) => c.id == sortField.collectionId);
+ 
 diff --git a/ui/src/records/recordsPickerModal.js b/ui/src/records/recordsPickerModal.js
 index 6db2667d..dca49067 100644
 --- a/ui/src/records/recordsPickerModal.js

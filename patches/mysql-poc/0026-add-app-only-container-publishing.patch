@@ -1,7 +1,7 @@
-From e92b0007a3426506a79bfcc55335fe41edfdc67f Mon Sep 17 00:00:00 2001
+From bf2f37f83b769c1f5373ad6cb00a9546d2fa2efa Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 06:39:45 +0700
-Subject: [PATCH 26/40] add app-only container publishing
+Subject: [PATCH 26/46] add app-only container publishing
 
 ---
  .dockerignore                       | 12 +++++++

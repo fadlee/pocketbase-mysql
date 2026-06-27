@@ -1,7 +1,7 @@
-From 34b12af9950b67ffb93065b20f32e409c209d3f5 Mon Sep 17 00:00:00 2001
+From cb6b9e80cbdb1491037feb33759fca39ba7cc2b4 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 01:11:34 +0700
-Subject: [PATCH 14/40] centralize MySQL data DB detection
+Subject: [PATCH 14/46] centralize MySQL data DB detection
 
 ---
  core/db_connect.go |  5 -----

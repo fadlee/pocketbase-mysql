@@ -1,7 +1,7 @@
-From d68e2607bfa51f2d22eca9f85dfa9cbc83ca7eac Mon Sep 17 00:00:00 2001
+From 121a4174cf658bbe9e8b1a803fde8c0906115c7d Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 22:00:36 +0700
-Subject: [PATCH 39/40] Package release binaries as zip archives
+Subject: [PATCH 37/46] Package release binaries as zip archives
 
 ---
  .github/workflows/release-pocketbase-mysql.yaml | 9 +++++++--

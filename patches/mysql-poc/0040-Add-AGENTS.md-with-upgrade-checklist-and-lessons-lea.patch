@@ -1,0 +1,428 @@
+From ef47481b86ada23d756cde2b095b90c689fb0413 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 22:14:07 +0700
+Subject: [PATCH 40/46] Add AGENTS.md with upgrade checklist and lessons
+ learned, remove bash scripts
+
+---
+ AGENTS.md                       |  68 ++++++++
+ scripts/apply-mysql-patches.sh  |  21 ---
+ scripts/export-mysql-patches.sh |  30 ----
+ scripts/mysql-runtime-qa.sh     | 265 --------------------------------
+ 4 files changed, 68 insertions(+), 316 deletions(-)
+ create mode 100644 AGENTS.md
+ delete mode 100755 scripts/apply-mysql-patches.sh
+ delete mode 100755 scripts/export-mysql-patches.sh
+ delete mode 100755 scripts/mysql-runtime-qa.sh
+
+diff --git a/AGENTS.md b/AGENTS.md
+new file mode 100644
+index 00000000..e7154d0b
+--- /dev/null
++++ b/AGENTS.md
+@@ -0,0 +1,68 @@
++# AGENTS.md
++
++## Project Overview
++
++PocketBase MySQL fork — adds MySQL-backed data DB support on top of upstream PocketBase releases. The fork is maintained as a replayable patch stack.
++
++## Key Architecture
++
++- Upstream baseline: PocketBase `v0.38.2`
++- MySQL connection via env vars: `PB_DATABASE_DRIVER=mysql` and `PB_DATABASE_DSN=<dsn>`
++- Patch stack lives in `patches/mysql-poc/`
++- Scripts are Node.js only (no bash/python dependency)
++
++## Scripts
++
++- `node scripts/apply-mysql-patches.mjs [patch-dir]` — apply patch stack
++- `node scripts/export-mysql-patches.mjs <base-ref>` — export patch stack
++- `node scripts/mysql-runtime-qa.mjs [options]` — runtime QA against MySQL
++
++## Upstream Upgrade Checklist
++
++When upgrading to a new upstream PocketBase version:
++
++1. **Export patches first** — run `node scripts/export-mysql-patches.mjs <current-base>` before switching branches.
++
++2. **Scan new migrations for SQLite-specific code** — grep for `sqlite_master`, `sqlite_schema`, `PRAGMA`, `randomblob`, `strftime`, `_rowid_`. Add MySQL early-return guards where needed.
++
++3. **Skip `ui/dist` conflicts during replay** — bundle hashes always differ. Skip patches that only conflict in `ui/dist`, then run `cd ui && npm run build` once at the end.
++
++4. **Run `go mod tidy` and commit `go.sum`** — always verify `go.sum` is committed before pushing. CI will fail on missing checksums.
++
++5. **Test QA script locally before declaring done** — ensure the QA script uses the correct connection mechanism (env vars, not CLI flags).
++
++6. **Review CI/CD workflows after replay** — check release packaging (zip), ghupdate owner/repo config, and workflow triggers for redundancy.
++
++7. **Tag only after CI is green** — do not tag until all fixes are committed and the branch builds successfully on CI. Avoids re-tagging.
++
++8. **Export patch stack as the very last step** — only after all fixes, docs updates, and workflow changes are committed. Export once, commit once.
++
++## MySQL-Specific Patterns
++
++- New upstream migrations that query `sqlite_master` or `sqlite_schema` need an early return:
++  ```go
++  if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++      return nil
++  }
++  ```
++- Sort expressions using `_rowid_` need a MySQL fallback resolving to `id`.
++- `LIKE` filter escaping differs between SQLite and MySQL.
++- Partial indexes (`WHERE` clause in `CREATE INDEX`) are not supported in MySQL — use regular indexes.
++- UI source should use portable sort fields (`-created,-id`) instead of `@rowid`.
++
++## Build & Test
++
++```sh
++go build ./...                    # compile check
++go test ./...                     # unit tests (some flaky on Windows: symlink, timing)
++go build -o pocketbase-mysql ./examples/base   # build binary
++node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-password "" --mysql-database pocketbase_qa
++```
++
++## Release Flow
++
++1. Ensure all changes committed and CI green
++2. `git tag -a v0.38.x-mysql.N -m "..."`
++3. `git push origin mysql/main && git push origin <tag>`
++4. `gh release create <tag> --repo fadlee/pocketbase-mysql --title "<tag>" --notes "..."`
++5. Workflows auto-trigger: `release-pocketbase-mysql` (zip binaries), `publish-ghcr` (Docker image)
+diff --git a/scripts/apply-mysql-patches.sh b/scripts/apply-mysql-patches.sh
+deleted file mode 100755
+index 7bb28fe1..00000000
+--- a/scripts/apply-mysql-patches.sh
++++ /dev/null
+@@ -1,21 +0,0 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-patch_dir="${1:-${MYSQL_PATCH_DIR:-patches/mysql-poc}}"
+-
+-repo_root="$(git rev-parse --show-toplevel)"
+-cd "$repo_root"
+-
+-if [ -n "$(git status --porcelain)" ]; then
+-	echo "Refusing to apply patches on a dirty worktree." >&2
+-	exit 1
+-fi
+-
+-shopt -s nullglob
+-patches=("$patch_dir"/*.patch)
+-if [ "${#patches[@]}" -eq 0 ]; then
+-	echo "No patch files found in $patch_dir" >&2
+-	exit 1
+-fi
+-
+-git am "${patches[@]}"
+diff --git a/scripts/export-mysql-patches.sh b/scripts/export-mysql-patches.sh
+deleted file mode 100755
+index 71612eed..00000000
+--- a/scripts/export-mysql-patches.sh
++++ /dev/null
+@@ -1,30 +0,0 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-base_ref="${1:-${MYSQL_PATCH_BASE:-7829cb3b}}"
+-out_dir="${MYSQL_PATCH_DIR:-patches/mysql-poc}"
+-
+-repo_root="$(git rev-parse --show-toplevel)"
+-cd "$repo_root"
+-
+-rm -rf "$out_dir"
+-mkdir -p "$out_dir"
+-
+-git format-patch --output-directory "$out_dir" "$base_ref"..HEAD
+-
+-cat > "$out_dir/README.md" <<EOF
+-# MySQL PoC Patch Stack
+-
+-Generated from:
+-
+-- Base ref: \`$base_ref\`
+-- Head ref: \`$(git rev-parse --short HEAD)\`
+-
+-Apply to a clean upstream worktree with:
+-
+-\`\`\`sh
+-scripts/apply-mysql-patches.sh $out_dir
+-\`\`\`
+-EOF
+-
+-echo "Exported MySQL patch stack to $out_dir"
+diff --git a/scripts/mysql-runtime-qa.sh b/scripts/mysql-runtime-qa.sh
+deleted file mode 100755
+index 8dab4bac..00000000
+--- a/scripts/mysql-runtime-qa.sh
++++ /dev/null
+@@ -1,265 +0,0 @@
+-#!/usr/bin/env bash
+-set -euo pipefail
+-
+-repo_root="$(git rev-parse --show-toplevel)"
+-cd "$repo_root"
+-
+-container_name="${MYSQL_QA_CONTAINER:-pb-mysql-runtime-qa}"
+-mysql_port="${MYSQL_QA_MYSQL_PORT:-3307}"
+-http_addr="${MYSQL_QA_HTTP_ADDR:-127.0.0.1:18090}"
+-tmp_dir="${MYSQL_QA_TMP_DIR:-/tmp/opencode/pb-mysql-runtime-qa}"
+-mysql_image="${MYSQL_QA_IMAGE:-mysql:8.4}"
+-mysql_password="${MYSQL_QA_PASSWORD:-pbpass}"
+-mysql_database="${MYSQL_QA_DATABASE:-pocketbase}"
+-
+-mkdir -p "$tmp_dir"
+-
+-cleanup() {
+-	if [ -f "$tmp_dir/pb.pid" ]; then
+-		kill "$(cat "$tmp_dir/pb.pid")" 2>/dev/null || true
+-	fi
+-	docker rm -f "$container_name" >/dev/null 2>&1 || true
+-}
+-trap cleanup EXIT
+-
+-cleanup
+-
+-if ss -ltn "sport = :${http_addr##*:}" | grep -q LISTEN; then
+-	echo "HTTP address $http_addr is already in use." >&2
+-	exit 1
+-fi
+-
+-docker run --rm -d \
+-	--name "$container_name" \
+-	-e MYSQL_ROOT_PASSWORD="$mysql_password" \
+-	-e MYSQL_DATABASE="$mysql_database" \
+-	-p "$mysql_port:3306" \
+-	"$mysql_image" >/dev/null
+-
+-for _ in $(seq 1 90); do
+-	if docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null 2>&1; then
+-		break
+-	fi
+-	sleep 1
+-done
+-docker exec "$container_name" mysql -h127.0.0.1 -uroot -p"$mysql_password" "$mysql_database" -e "SELECT 1" >/dev/null
+-
+-rm -rf "$tmp_dir/pb_data" "$tmp_dir/pb_migrations" "$tmp_dir/pb.log" "$tmp_dir/pocketbase-qa"
+-dsn="root:${mysql_password}@tcp(127.0.0.1:${mysql_port})/${mysql_database}?parseTime=true&multiStatements=true"
+-
+-go build -o "$tmp_dir/pocketbase-qa" ./examples/base
+-
+-PB_DATABASE_DRIVER=mysql PB_DATABASE_DSN="$dsn" \
+-	"$tmp_dir/pocketbase-qa" serve --dir "$tmp_dir/pb_data" --http "$http_addr" \
+-	> "$tmp_dir/pb.log" 2>&1 &
+-echo $! > "$tmp_dir/pb.pid"
+-
+-for _ in $(seq 1 90); do
+-	if grep -q "Server started" "$tmp_dir/pb.log"; then
+-		break
+-	fi
+-	if ! kill -0 "$(cat "$tmp_dir/pb.pid")" 2>/dev/null; then
+-		cat "$tmp_dir/pb.log"
+-		exit 1
+-	fi
+-	sleep 1
+-done
+-
+-PB_DATABASE_DRIVER=mysql PB_DATABASE_DSN="$dsn" \
+-	"$tmp_dir/pocketbase-qa" superuser upsert qa@example.com password123 --dir "$tmp_dir/pb_data" \
+-	> "$tmp_dir/superuser.log" 2>&1
+-
+-base_url="http://${http_addr}"
+-token="$(curl -sS -X POST "$base_url/api/collections/_superusers/auth-with-password" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"identity":"qa@example.com","password":"password123"}' | jq -r '.token')"
+-
+-if [ -z "$token" ] || [ "$token" = "null" ]; then
+-	echo "Failed to authenticate QA superuser" >&2
+-	exit 1
+-fi
+-
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_runtime","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"published","type":"bool"}],"indexes":["CREATE INDEX idx_qa_runtime_title ON qa_runtime (title)"]}' \
+-	> "$tmp_dir/create_collection.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_runtime/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"hello mysql runtime","published":true}' \
+-	> "$tmp_dir/create_record.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_runtime/records?sort=title" \
+-	> "$tmp_dir/list_records.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=title~%22runtime%22" \
+-	> "$tmp_dir/filter_records.json"
+-
+-collection_id="$(jq -r '.id' "$tmp_dir/create_collection.json")"
+-jq '.fields += [{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}] | {fields:.fields}' \
+-	"$tmp_dir/create_collection.json" > "$tmp_dir/add_select_payload.json"
+-
+-curl -sS -f -X PATCH "$base_url/api/collections/${collection_id}" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data @"$tmp_dir/add_select_payload.json" \
+-	> "$tmp_dir/update_collection_add_select.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_runtime/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"schema updated","published":false,"status":"draft"}' \
+-	> "$tmp_dir/create_record_after_schema_update.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_runtime/records?filter=status=%22draft%22" \
+-	> "$tmp_dir/filter_select_records.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_multi_select","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"tags","type":"select","required":false,"values":["alpha","beta","gamma"],"maxSelect":3}]}' \
+-	> "$tmp_dir/create_multi_select_collection.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_multi_select/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"multi select","tags":["alpha","beta"]}' \
+-	> "$tmp_dir/create_multi_select_record.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_multi_select/records?filter=tags~%22alpha%22" \
+-	> "$tmp_dir/filter_multi_select_records.json"
+-
+-matrix_id="$(jq -r '.id' "$tmp_dir/create_multi_select_collection.json")"
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_matrix","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"status","type":"select","required":false,"values":["draft","published"],"maxSelect":1}]}' \
+-	> "$tmp_dir/create_matrix_collection.json"
+-
+-matrix_id="$(jq -r '.id' "$tmp_dir/create_matrix_collection.json")"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"before matrix","status":"draft"}' \
+-	> "$tmp_dir/create_matrix_record.json"
+-
+-jq '(.fields[] | select(.name == "status") | .name) = "state" | {fields:.fields}' \
+-	"$tmp_dir/create_matrix_collection.json" > "$tmp_dir/matrix_rename_payload.json"
+-
+-curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data @"$tmp_dir/matrix_rename_payload.json" \
+-	> "$tmp_dir/matrix_rename_result.json"
+-sleep 1
+-
+-jq '.fields |= map(select(.name != "title")) | {fields:.fields}' \
+-	"$tmp_dir/matrix_rename_result.json" > "$tmp_dir/matrix_delete_payload.json"
+-
+-curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data @"$tmp_dir/matrix_delete_payload.json" \
+-	> "$tmp_dir/matrix_delete_result.json"
+-sleep 1
+-
+-jq '(.fields[] | select(.name == "state") | .maxSelect) = 3 | (.fields[] | select(.name == "state") | .values) = ["draft","published","archived"] | {fields:.fields}' \
+-	"$tmp_dir/matrix_delete_result.json" > "$tmp_dir/matrix_single_to_multi_payload.json"
+-
+-curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data @"$tmp_dir/matrix_single_to_multi_payload.json" \
+-	> "$tmp_dir/matrix_single_to_multi_result.json"
+-sleep 1
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_matrix/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"state":["draft","published"]}' \
+-	> "$tmp_dir/create_matrix_multi_record.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state~%22draft%22" \
+-	> "$tmp_dir/filter_matrix_multi_records.json"
+-
+-jq '(.fields[] | select(.name == "state") | .maxSelect) = 1 | {fields:.fields}' \
+-	"$tmp_dir/matrix_single_to_multi_result.json" > "$tmp_dir/matrix_multi_to_single_payload.json"
+-
+-curl -sS -f -X PATCH "$base_url/api/collections/${matrix_id}" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data @"$tmp_dir/matrix_multi_to_single_payload.json" \
+-	> "$tmp_dir/matrix_multi_to_single_result.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_matrix/records?filter=state=%22published%22" \
+-	> "$tmp_dir/filter_matrix_single_records.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_authors","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"name","type":"text","required":true,"max":255}]}' \
+-	> "$tmp_dir/create_authors_collection.json"
+-
+-authors_collection_id="$(jq -r '.id' "$tmp_dir/create_authors_collection.json")"
+-
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_books","type":"base","listRule":"","viewRule":"","createRule":"","updateRule":"","deleteRule":"","fields":[{"name":"title","type":"text","required":true,"max":255},{"name":"authors","type":"relation","required":false,"collectionId":"'"${authors_collection_id}"'","maxSelect":3}]}' \
+-	> "$tmp_dir/create_books_collection.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"Author One"}' \
+-	> "$tmp_dir/create_author_one.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_authors/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"Author Two"}' \
+-	> "$tmp_dir/create_author_two.json"
+-
+-author_one_id="$(jq -r '.id' "$tmp_dir/create_author_one.json")"
+-author_two_id="$(jq -r '.id' "$tmp_dir/create_author_two.json")"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"Book One","authors":["'"${author_one_id}"'","'"${author_two_id}"'"]}' \
+-	> "$tmp_dir/create_book_one.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_authors/records?filter=qa_books_via_authors.title~%22Book%22" \
+-	> "$tmp_dir/filter_back_relation_records.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_books/records?filter=authors.name~%22Author%22" \
+-	> "$tmp_dir/filter_forward_relation_records.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_books/records?expand=authors" \
+-	> "$tmp_dir/expand_relation_records.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections" \
+-	-H "Authorization: Bearer ${token}" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"name":"qa_books_view","type":"view","viewQuery":"SELECT id, title FROM qa_books"}' \
+-	> "$tmp_dir/create_books_view_collection.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_books_view/records" \
+-	-H "Authorization: Bearer ${token}" \
+-	> "$tmp_dir/list_books_view_records.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_books_view/records?filter=title~%22Book%22" \
+-	-H "Authorization: Bearer ${token}" \
+-	> "$tmp_dir/filter_books_view_records.json"
+-
+-curl -sS -f -X POST "$base_url/api/collections/qa_books/records" \
+-	-H 'Content-Type: application/json' \
+-	--data '{"title":"Book Two"}' \
+-	> "$tmp_dir/create_book_two.json"
+-
+-curl -sS -f "$base_url/api/collections/qa_books_view/records?sort=title" \
+-	-H "Authorization: Bearer ${token}" \
+-	> "$tmp_dir/list_books_view_after_update.json"
+-
+-if grep -q "ERROR" "$tmp_dir/pb.log"; then
+-	echo "Runtime QA completed but server log contains ERROR entries:" >&2
+-	grep "ERROR" "$tmp_dir/pb.log" >&2
+-	exit 1
+-fi
+-
+-echo "MySQL runtime QA passed. Logs: $tmp_dir/pb.log"
+-- 
+2.54.0.windows.1
+

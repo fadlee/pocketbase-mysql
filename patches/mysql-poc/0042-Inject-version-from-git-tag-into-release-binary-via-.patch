@@ -1,0 +1,28 @@
+From 1f295d5d2c4061615345f506eede9335eaf796a8 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 23:30:08 +0700
+Subject: [PATCH 42/46] Inject version from git tag into release binary via
+ ldflags
+
+---
+ .github/workflows/release-pocketbase-mysql.yaml | 4 +++-
+ 1 file changed, 3 insertions(+), 1 deletion(-)
+
+diff --git a/.github/workflows/release-pocketbase-mysql.yaml b/.github/workflows/release-pocketbase-mysql.yaml
+index ce60762d..94bc14a1 100644
+--- a/.github/workflows/release-pocketbase-mysql.yaml
++++ b/.github/workflows/release-pocketbase-mysql.yaml
+@@ -49,7 +49,9 @@ jobs:
+           CGO_ENABLED: 0
+           GOOS: ${{ matrix.goos }}
+           GOARCH: ${{ matrix.goarch }}
+-        run: go build -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
++        run: |
++          version="${GITHUB_REF_NAME}"
++          go build -ldflags "-X github.com/pocketbase/pocketbase.Version=${version}" -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
+ 
+       - name: Package release asset
+         shell: bash
+-- 
+2.54.0.windows.1
+

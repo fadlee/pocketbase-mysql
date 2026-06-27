@@ -1,0 +1,46 @@
+From 7c6b06d5497c86799402fb908ace6b0e3eb6a25b Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 25 May 2026 23:48:11 +0700
+Subject: [PATCH 43/46] Centralize version injection via ldflags in all build
+ paths
+
+---
+ .github/workflows/build-pocketbase-mysql.yaml | 4 +++-
+ Makefile                                      | 5 ++++-
+ 2 files changed, 7 insertions(+), 2 deletions(-)
+
+diff --git a/.github/workflows/build-pocketbase-mysql.yaml b/.github/workflows/build-pocketbase-mysql.yaml
+index 494e9577..9e40167d 100644
+--- a/.github/workflows/build-pocketbase-mysql.yaml
++++ b/.github/workflows/build-pocketbase-mysql.yaml
+@@ -47,7 +47,9 @@ jobs:
+           CGO_ENABLED: 0
+           GOOS: ${{ matrix.goos }}
+           GOARCH: ${{ matrix.goarch }}
+-        run: go build -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
++        run: |
++          version="$(git describe --tags --always --dirty)"
++          go build -ldflags "-X github.com/pocketbase/pocketbase.Version=${version}" -o pocketbase-mysql${{ matrix.binary_suffix }} ./examples/base
+ 
+       - name: Upload artifact
+         uses: actions/upload-artifact@v4
+diff --git a/Makefile b/Makefile
+index 35be4725..b0f672fd 100644
+--- a/Makefile
++++ b/Makefile
+@@ -1,8 +1,11 @@
++VERSION ?= $(shell git describe --tags --always --dirty)
++LDFLAGS := -X github.com/pocketbase/pocketbase.Version=$(VERSION)
++
+ lint:
+ 	golangci-lint run -c ./golangci.yml ./...
+ 
+ build:
+-	go build -o pocketbase-mysql ./examples/base
++	go build -ldflags "$(LDFLAGS)" -o pocketbase-mysql ./examples/base
+ 
+ test:
+ 	go test ./... -v --cover
+-- 
+2.54.0.windows.1
+
