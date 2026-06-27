@@ -6,7 +6,7 @@ PocketBase MySQL fork — adds MySQL-backed data DB support on top of upstream P
 
 ## Key Architecture
 
-- Upstream baseline: PocketBase `v0.38.2`
+- Upstream baseline: PocketBase `v0.39.4`
 - MySQL connection via env vars: `PB_DATABASE_DRIVER=mysql` and `PB_DATABASE_DSN=<dsn>`
 - Patch stack lives in `patches/mysql-poc/`
 - Scripts are Node.js only (no bash/python dependency)
@@ -62,25 +62,25 @@ node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-passwo
 ## Release Flow
 
 1. Ensure all changes committed and CI green
-2. `git tag -a v0.38.x-mysql.N -m "..."`
+2. `git tag -a v0.39.x-mysql.N -m "..."`
 3. `git push origin mysql/main && git push origin <tag>`
 4. `gh release create <tag> --repo fadlee/pocketbase-mysql --title "<tag>" --notes "..."`
 5. Workflows auto-trigger: `release-pocketbase-mysql` (zip binaries), `publish-ghcr` (Docker image)
 
 ## Full Upstream Upgrade Flow
 
-End-to-end steps when a new upstream version (e.g. `v0.38.3`) is released:
+End-to-end steps when a new upstream version (e.g. `v0.39.5`) is released:
 
 ```sh
 # 1. Export current patch stack
-node scripts/export-mysql-patches.mjs v0.38.2
+node scripts/export-mysql-patches.mjs v0.39.4
 
 # 2. Create branch from new upstream tag
 git fetch upstream
-git switch --create mysql/rebase-v0.38.3 v0.38.3
+git switch --create mysql/rebase-v0.39.5 v0.39.5
 
 # 3. Scan new migrations for SQLite-specific code
-git diff v0.38.2..v0.38.3 -- migrations/ | grep -i "sqlite\|pragma\|rowid"
+git diff v0.39.4..v0.39.5 -- migrations/ | grep -i "sqlite\|pragma\|rowid"
 # Add MySQL early-return guards where needed
 
 # 4. Apply patch stack
@@ -102,16 +102,16 @@ node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-passwo
 # 7. Update docs (README, gap-analysis, upstream-workflow) — change baseline refs
 
 # 8. Export patch stack (once, as the very last step)
-node scripts/export-mysql-patches.mjs v0.38.3
-git add patches/mysql-poc/ && git commit -m "Refresh patch stack for v0.38.3"
+node scripts/export-mysql-patches.mjs v0.39.5
+git add patches/mysql-poc/ && git commit -m "Refresh patch stack for v0.39.5"
 
 # 9. Merge to mysql/main, tag, release
 git switch mysql/main
-git reset --hard mysql/rebase-v0.38.3
-git tag -a v0.38.3-mysql.1 -m "PocketBase v0.38.3 MySQL fork release 1"
+git reset --hard mysql/rebase-v0.39.5
+git tag -a v0.39.5-mysql.1 -m "PocketBase v0.39.5 MySQL fork release 1"
 git push --force-with-lease origin mysql/main
-git push origin v0.38.3-mysql.1
-gh release create v0.38.3-mysql.1 --repo fadlee/pocketbase-mysql --title "v0.38.3-mysql.1" --notes "..."
+git push origin v0.39.5-mysql.1
+gh release create v0.39.5-mysql.1 --repo fadlee/pocketbase-mysql --title "v0.39.5-mysql.1" --notes "..."
 ```
 
 Key principle: one direction, tag only once at the end after CI is green.

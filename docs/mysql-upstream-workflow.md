@@ -10,10 +10,10 @@ Export the current MySQL patch stack:
 scripts/export-mysql-patches.sh
 ```
 
-By default the script exports commits after the upstream baseline tag. For the v0.38.2 upgrade, the base ref is `v0.38.2`:
+By default the script exports commits after the upstream baseline tag. For the v0.39.4 upgrade, the base ref is `v0.39.4`:
 
 ```sh
-node scripts/export-mysql-patches.mjs v0.38.2
+node scripts/export-mysql-patches.mjs v0.39.4
 ```
 
 For older branches based on v0.38.1, use:

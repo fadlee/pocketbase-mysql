@@ -1,6 +1,6 @@
 # MySQL Gap Analysis
 
-Baseline: PocketBase v0.38.2.
+Baseline: PocketBase v0.39.4.
 
 This document tracks the first SQLite-specific areas that must be addressed before a MySQL backend can work. See `docs/mysql-upstream-workflow.md` for the patch-stack, upstream update, and runtime QA workflow used to keep this fork rebaseable.
 
@@ -8,7 +8,7 @@ This document tracks the first SQLite-specific areas that must be addressed befo
 
 - `go build ./...`: passed.
 - `go test ./...`: passed.
-- Upstream source imported from tag `v0.38.2` on branch `mysql/rebase-v0.38.2`.
+- Upstream source imported from tag `v0.39.4` on branch `mysql/rebase-v0.39.4`.
 
 ## Initial High-Risk Areas
 
@@ -257,11 +257,11 @@ Interpretation:
 
 - The initial system migration can now complete on MySQL.
 - The next blocker is a historical migration that expects the legacy `_params` table shape with a `key` column.
-- Since this fork starts from a fresh v0.38.2 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
+- Since this fork starts from a fresh v0.39.4 schema, older upgrade migrations need a MySQL-aware skip/reapply strategy rather than assuming legacy SQLite schema exists.
 
 ## Milestone 2 Legacy v0.23 Migration Skip Result
 
-The legacy v0.23 migration group now exits early for MySQL. These migrations are upgrade-only paths for older SQLite schemas and are not needed for the fresh MySQL v0.38.2 schema created by `1640988000_init.go`.
+The legacy v0.23 migration group now exits early for MySQL. These migrations are upgrade-only paths for older SQLite schemas and are not needed for the fresh MySQL v0.39.4 schema created by `1640988000_init.go`.
 
 Manual QA with a fresh MySQL 8.4 container now reaches the next startup blocker:
 

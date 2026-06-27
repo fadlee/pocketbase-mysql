@@ -16,7 +16,7 @@ This repository is a PocketBase fork that adds a MySQL-backed data DB PoC while 
 
 Current baseline:
 
-- upstream source imported from PocketBase `v0.38.2`
+- upstream source imported from PocketBase `v0.39.4`
 - active development branch: `mysql/main`
 - upstream remote kept as `upstream`
 - GitHub fork repo: `fadlee/pocketbase-mysql`
@@ -48,7 +48,7 @@ See `docs/mysql-upstream-workflow.md` for the detailed rebase and patch workflow
 
 ## Parity Snapshot
 
-Compared with upstream PocketBase `v0.38.2`, the MySQL fork currently has the following runtime status:
+Compared with upstream PocketBase `v0.39.4`, the MySQL fork currently has the following runtime status:
 
 | Area | Status | Notes |
 |---|---|---|
@@ -137,7 +137,7 @@ Publish behavior:
 
 - push to `mysql/main` -> push `ghcr.io/fadlee/pocketbase-mysql:mysql-main`
 - default branch builds can also carry `latest` when `mysql/main` is the repo default branch
-- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.38.2-mysql.1`
+- push tag `v*` -> push tag-matched image tags, e.g. `ghcr.io/fadlee/pocketbase-mysql:v0.39.4-mysql.1`
 
 The workflow builds multi-arch images for:
 
