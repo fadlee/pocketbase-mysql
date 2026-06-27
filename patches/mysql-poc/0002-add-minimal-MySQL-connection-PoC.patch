@@ -1,7 +1,7 @@
 From af7ad2f3831a3211633436162328b8c68bc26704 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:36:08 +0700
-Subject: [PATCH 02/46] add minimal MySQL connection PoC
+Subject: [PATCH 02/48] add minimal MySQL connection PoC
 
 ---
  core/db_connect.go         | 20 ++++++++++++++++++++

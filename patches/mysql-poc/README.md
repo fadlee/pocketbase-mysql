@@ -3,7 +3,7 @@
 Generated from:
 
 - Base ref: `v0.39.4` (507ecb26)
-- Head ref: `mysql/rebase-v0.39.4` (bc7c861f)
+- Head ref: `mysql/rebase-v0.39.4` (61d530a5)
 - Date: 2026-06-27
 
 Apply to a clean upstream worktree with:

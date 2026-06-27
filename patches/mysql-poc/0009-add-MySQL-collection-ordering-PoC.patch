@@ -1,7 +1,7 @@
 From b39f5e255e95cc7bd238bf944064aca8dbe32012 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 00:28:32 +0700
-Subject: [PATCH 09/46] add MySQL collection ordering PoC
+Subject: [PATCH 09/48] add MySQL collection ordering PoC
 
 ---
  core/collection_query.go   |  7 ++++++-

@@ -1,7 +1,7 @@
 From d8afd51d61f0bbe8638b1226220eaef989d7ef47 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 00:14:01 +0700
-Subject: [PATCH 07/46] add MySQL partial index PoC
+Subject: [PATCH 07/48] add MySQL partial index PoC
 
 ---
  core/collection_record_table_sync.go |  3 +++

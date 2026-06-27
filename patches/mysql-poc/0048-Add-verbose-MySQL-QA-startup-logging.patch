@@ -1,0 +1,143 @@
+From 61d530a54c215fcef1ffe3e0ce391aec30dd213c Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 13:05:24 +0700
+Subject: [PATCH 48/48] Add verbose MySQL QA startup logging
+
+---
+ scripts/mysql-runtime-qa.mjs | 64 +++++++++++++++++++++++++++++++-----
+ 1 file changed, 55 insertions(+), 9 deletions(-)
+
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index c0bb7f39..26d04d0e 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -134,6 +134,20 @@ class QA {
+ 
+   log(msg) { console.log(msg); }
+ 
++  logStep(msg) { this.log(`[qa] ${msg}`); }
++
++  logWait(label, attempt, max) {
++    if (attempt === 1 || attempt % 5 === 0 || attempt === max) {
++      this.logStep(`${label} (${attempt}/${max})...`);
++    }
++  }
++
++  tailFile(path, maxLines = 40) {
++    if (!existsSync(path)) return "";
++    const lines = readFileSync(path, "utf8").trimEnd().split(/\r?\n/);
++    return lines.slice(-maxLines).join("\n");
++  }
++
+   assert(condition, msg) {
+     if (!condition) throw new Error(`ASSERTION FAILED: ${msg}`);
+   }
+@@ -174,10 +188,13 @@ class QA {
+ 
+   maybeStartDocker() {
+     if (this.opts.skipDocker) {
+-      this.log(`Skipping Docker - using existing MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}`);
++      this.logStep(`Skipping Docker - using existing MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}`);
+       return;
+     }
++    this.logStep(`Removing any previous MySQL container '${this.opts.mysqlContainer}'...`);
+     spawnSync("docker", ["rm", "-f", this.opts.mysqlContainer], { stdio: "ignore" });
++
++    this.logStep(`Starting MySQL container '${this.opts.mysqlContainer}' from ${this.opts.mysqlImage} on port ${this.opts.mysqlPort}...`);
+     const r = spawnSync("docker", [
+       "run", "--rm", "-d",
+       "--name", this.opts.mysqlContainer,
+@@ -186,28 +203,50 @@ class QA {
+       "-p", `${this.opts.mysqlPort}:3306`,
+       this.opts.mysqlImage,
+     ], { stdio: "pipe" });
+-    if (r.status !== 0) throw new Error("Failed to start MySQL Docker container");
++    if (r.status !== 0) {
++      const stderr = r.stderr?.toString().trim();
++      const stdout = r.stdout?.toString().trim();
++      throw new Error([
++        "Failed to start MySQL Docker container.",
++        stderr ? `docker stderr:\n${stderr}` : "",
++        stdout ? `docker stdout:\n${stdout}` : "",
++      ].filter(Boolean).join("\n"));
++    }
++    const containerId = r.stdout?.toString().trim();
++    if (containerId) this.logStep(`MySQL container started: ${containerId}`);
+     this.dockerStarted = true;
+ 
+     // Wait for MySQL to be ready
+-    for (let i = 0; i < 90; i++) {
++    this.logStep(`Waiting for MySQL readiness at ${this.opts.mysqlHost}:${this.opts.mysqlPort} (timeout: 90s)...`);
++    let lastError = "";
++    for (let i = 1; i <= 90; i++) {
+       const check = spawnSync("docker", [
+         "exec", this.opts.mysqlContainer,
+         "mysql", "-h127.0.0.1", `-uroot`, `-p${this.opts.mysqlPassword}`,
+         this.opts.mysqlDatabase, "-e", "SELECT 1",
+       ], { stdio: "pipe" });
+-      if (check.status === 0) return;
++      if (check.status === 0) {
++        this.logStep(`MySQL ready after ${i}s.`);
++        return;
++      }
++      lastError = check.stderr?.toString().trim() || check.stdout?.toString().trim() || lastError;
++      this.logWait("MySQL not ready yet", i, 90);
+       spawnSync("sleep", ["1"]);
+     }
+-    throw new Error("MySQL container did not become ready in time");
++    throw new Error([
++      "MySQL container did not become ready in time.",
++      lastError ? `Last readiness error:\n${lastError}` : "",
++    ].filter(Boolean).join("\n"));
+   }
+ 
+   buildBinary() {
+     if (existsSync(this.binary)) rmSync(this.binary);
++    this.logStep(`Building PocketBase QA binary: ${this.binary}`);
+     const r = spawnSync("go", ["build", "-o", this.binary, "./examples/base"], {
+       cwd: REPO_ROOT, stdio: "inherit",
+     });
+     if (r.status !== 0) throw new Error("Failed to build binary");
++    this.logStep("PocketBase QA binary built.");
+   }
+ 
+   async startServer() {
+@@ -219,6 +258,8 @@ class QA {
+ 
+     const { openSync, closeSync } = await import("node:fs");
+     const logFd = openSync(this.pbLog, "w");
++    this.logStep(`Starting PocketBase server at ${this.opts.httpAddr}...`);
++    this.logStep(`PocketBase log: ${this.pbLog}`);
+     this.pbProc = spawn(
+       this.binary,
+       ["serve", "--dir", this.pbData, "--migrationsDir", this.pbMigrations, "--http", this.opts.httpAddr],
+@@ -226,17 +267,22 @@ class QA {
+     );
+     closeSync(logFd);
+ 
+-    for (let i = 0; i < 90; i++) {
++    this.logStep("Waiting for PocketBase server startup (timeout: 90s)...");
++    for (let i = 1; i <= 90; i++) {
+       await sleep(1000);
+       if (existsSync(this.pbLog)) {
+         const log = readFileSync(this.pbLog, "utf8");
+-        if (log.includes("Server started")) return;
++        if (log.includes("Server started")) {
++          this.logStep(`PocketBase server ready after ${i}s.`);
++          return;
++        }
+       }
+       if (this.pbProc.exitCode !== null) {
+-        throw new Error(readFileSync(this.pbLog, "utf8"));
++        throw new Error(`PocketBase server exited during startup. Log tail:\n${this.tailFile(this.pbLog)}`);
+       }
++      this.logWait("PocketBase not ready yet", i, 90);
+     }
+-    throw new Error("Server did not start in time");
++    throw new Error(`Server did not start in time. Log tail:\n${this.tailFile(this.pbLog)}`);
+   }
+ 
+   async createSuperuserAndAuth() {
+-- 
+2.54.0.windows.1
+
