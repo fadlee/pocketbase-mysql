@@ -50,6 +50,43 @@ func TestSelectFieldColumnType(t *testing.T) {
 	}
 }
 
+func TestSelectFieldMySQLColumnType(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+
+	scenarios := []struct {
+		name     string
+		field    *core.SelectField
+		expected string
+	}{
+		{
+			"single without values",
+			&core.SelectField{MaxSelect: 1},
+			"VARCHAR(1) DEFAULT '' NOT NULL",
+		},
+		{
+			"single with values",
+			&core.SelectField{MaxSelect: 1, Values: []string{"a", "payment_request_verified"}},
+			"VARCHAR(24) DEFAULT '' NOT NULL",
+		},
+		{
+			"multiple",
+			&core.SelectField{MaxSelect: 2, Values: []string{"a", "payment_request_verified"}},
+			"JSON NOT NULL",
+		},
+	}
+
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			if v := s.field.ColumnType(app); v != s.expected {
+				t.Fatalf("Expected\n%q\ngot\n%q", s.expected, v)
+			}
+		})
+	}
+}
+
 func TestSelectFieldIsMultiple(t *testing.T) {
 	scenarios := []struct {
 		name     string

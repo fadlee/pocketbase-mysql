@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"database/sql/driver"
+	"fmt"
 	"slices"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -146,7 +147,13 @@ func (f *SelectField) ColumnType(app App) string {
 	}
 
 	if isMySQLDataDB(app) {
-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+		max := 1
+		for _, value := range f.Values {
+			if len(value) > max {
+				max = len(value)
+			}
+		}
+		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
 	}
 
 	return "TEXT DEFAULT '' NOT NULL"

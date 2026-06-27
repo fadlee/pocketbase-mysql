@@ -897,8 +897,10 @@ class QA {
         { name: "recipient_user", type: "relation", required: true, collectionId: usersCol.id, maxSelect: 1 },
         { name: "type", type: "select", required: true, maxSelect: 1, values: ["payment_request_verified"] },
         { name: "title", type: "text", required: true, max: 100 },
-        { name: "entity_collection", type: "text", required: true, max: 64 },
-        { name: "entity_id", type: "text", required: true, max: 15 },
+        // Keep these text fields unbounded to mirror exported PocketBase migrations
+        // where max=0 would otherwise map to VARCHAR(255) on MySQL.
+        { name: "entity_collection", type: "text", required: true, max: 0 },
+        { name: "entity_id", type: "text", required: true, max: 0 },
       ],
       indexes: [
         "CREATE UNIQUE INDEX idx_qa_notifications_logical_event ON qa_notifications (recipient_user, type, entity_collection, entity_id)",
