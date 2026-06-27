@@ -17,9 +17,45 @@ func NewServeCommand(app core.App, showStartBanner bool) *cobra.Command {
 	var httpsAddr string
 
 	command := &cobra.Command{
-		Use:          "serve [domain(s)]",
-		Args:         cobra.ArbitraryArgs,
-		Short:        "Starts the web server (default to 127.0.0.1:8090 if no domain is specified)",
+		Use:   "serve [domain(s)]",
+		Args:  cobra.ArbitraryArgs,
+		Short: "Starts the web server (default to 127.0.0.1:8090 if no domain is specified)",
+		Long: `Starts the web server (default to 127.0.0.1:8090 if no domain is specified).
+
+MySQL fork usage:
+  SQLite remains the default data DB. To use MySQL for the data DB, set:
+    PB_DATABASE_DRIVER=mysql
+    PB_DATABASE_DSN=<mysql-dsn>
+
+  Example DSN:
+    user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true
+
+  Linux/macOS/Git Bash:
+    PB_DATABASE_DRIVER=mysql \
+    PB_DATABASE_DSN='user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true' \
+    pocketbase-mysql serve
+
+  PowerShell:
+    $env:PB_DATABASE_DRIVER = "mysql"
+    $env:PB_DATABASE_DSN = "user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true"
+    .\pocketbase-mysql.exe serve
+
+  CMD.exe:
+    set PB_DATABASE_DRIVER=mysql
+    set PB_DATABASE_DSN=user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true^&multiStatements=true
+    pocketbase-mysql.exe serve
+
+  DSN notes:
+    parseTime=true        parse MySQL DATE/DATETIME/TIMESTAMP values as Go time values.
+    multiStatements=true  allow migration/schema SQL that contains multiple statements.
+
+  MySQL support:
+    Verified with MySQL 8.4 via the runtime QA suite. Other MySQL 8.x versions may
+    work but are not guaranteed by this fork.
+
+  Fork scope:
+    Only the data DB is routed to MySQL. The auxiliary/log DB remains SQLite.
+    Full upstream PocketBase feature parity is not claimed.`,
 		SilenceUsage: true,
 		RunE: func(command *cobra.Command, args []string) error {
 			// set default listener addresses if at least one domain is specified

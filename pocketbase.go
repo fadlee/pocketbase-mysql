@@ -101,7 +101,8 @@ func NewWithConfig(config Config) *PocketBase {
 	pb := &PocketBase{
 		RootCmd: &cobra.Command{
 			Use:     executableName,
-			Short:   executableName + " CLI",
+			Short:   "PocketBase MySQL fork CLI",
+			Long:    mysqlForkHelp(executableName),
 			Version: Version,
 			FParseErrWhitelist: cobra.FParseErrWhitelist{
 				UnknownFlags: true,
@@ -159,6 +160,52 @@ func NewWithConfig(config Config) *PocketBase {
 	})
 
 	return pb
+}
+
+func mysqlForkHelp(executableName string) string {
+	windowsName := executableName
+	if !strings.HasSuffix(strings.ToLower(windowsName), ".exe") {
+		windowsName += ".exe"
+	}
+
+	return `PocketBase MySQL fork CLI.
+
+SQLite remains the default data DB. To use MySQL for the data DB, configure
+the MySQL connection with environment variables before running serve.
+
+MySQL data DB environment variables:
+  PB_DATABASE_DRIVER=mysql
+  PB_DATABASE_DSN=<mysql-dsn>
+
+Example DSN:
+  user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true
+
+Linux/macOS/Git Bash:
+  PB_DATABASE_DRIVER=mysql \
+  PB_DATABASE_DSN='user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true' \
+  ` + executableName + ` serve
+
+PowerShell:
+  $env:PB_DATABASE_DRIVER = "mysql"
+  $env:PB_DATABASE_DSN = "user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true"
+  .\` + windowsName + ` serve
+
+CMD.exe:
+  set PB_DATABASE_DRIVER=mysql
+  set PB_DATABASE_DSN=user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true^&multiStatements=true
+  ` + windowsName + ` serve
+
+DSN notes:
+  parseTime=true        parse MySQL DATE/DATETIME/TIMESTAMP values as Go time values.
+  multiStatements=true  allow migration/schema SQL that contains multiple statements.
+
+MySQL support:
+  Verified with MySQL 8.4 via the runtime QA suite. Other MySQL 8.x versions may
+  work but are not guaranteed by this fork.
+
+Fork scope:
+  Only the data DB is routed to MySQL. The auxiliary/log DB remains SQLite.
+  Full upstream PocketBase feature parity is not claimed.`
 }
 
 // Start starts the application, aka. registers the default system
