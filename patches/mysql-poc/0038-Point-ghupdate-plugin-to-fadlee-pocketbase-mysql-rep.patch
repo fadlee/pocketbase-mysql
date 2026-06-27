@@ -1,7 +1,7 @@
 From 76fc6aa8af66c6d372c4f5a9705d91ff1deec38f Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 22:03:41 +0700
-Subject: [PATCH 38/50] Point ghupdate plugin to fadlee/pocketbase-mysql repo
+Subject: [PATCH 38/52] Point ghupdate plugin to fadlee/pocketbase-mysql repo
 
 ---
  examples/base/main.go | 6 +++++-

@@ -1,7 +1,7 @@
 From 550d5af08f5e87b6fec09d1783d5bca7da84d5a0 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 12:56:32 +0700
-Subject: [PATCH 45/50] Update docs for v0.39.4 baseline
+Subject: [PATCH 45/52] Update docs for v0.39.4 baseline
 
 ---
  AGENTS.md                       | 24 ++++++++++++------------

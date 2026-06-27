@@ -1,0 +1,298 @@
+From 188110ec5af09bffe8b20c04973a7552a9fc5f8b Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 14:02:21 +0700
+Subject: [PATCH 52/52] Fix MySQL not-equal filters and QA coverage
+
+---
+ scripts/mysql-runtime-qa.mjs | 209 ++++++++++++++++++++++++++++++++++-
+ tools/search/filter.go       |  15 ++-
+ 2 files changed, 219 insertions(+), 5 deletions(-)
+
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index d091e44a..9e3cbd74 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -207,13 +207,19 @@ function DELETE(url, opts) { return httpRequest("DELETE", url, opts); }
+ 
+ // Assert that a request fails with an expected HTTP status (negative tests).
+ async function expectStatus(label, expected, fn) {
++  return expectStatusOneOf(label, [expected], fn);
++}
++
++// Like expectStatus but tolerant of a set of acceptable statuses (PocketBase
++// may answer 403 or 404 depending on whether a rule hides record existence).
++async function expectStatusOneOf(label, expectedList, fn) {
+   try {
+     await fn();
+   } catch (err) {
+-    if (err instanceof HttpError && err.status === expected) return;
+-    throw new Error(`${label}: expected HTTP ${expected} but got: ${err.message}`);
++    if (err instanceof HttpError && expectedList.includes(err.status)) return err;
++    throw new Error(`${label}: expected HTTP ${expectedList.join("/")} but got: ${err.message}`);
+   }
+-  throw new Error(`${label}: expected HTTP ${expected} but request succeeded`);
++  throw new Error(`${label}: expected HTTP ${expectedList.join("/")} but request succeeded`);
+ }
+ 
+ // Build a multipart/form-data body from string and file fields.
+@@ -527,6 +533,36 @@ class QA {
+     return PATCH(`${this.baseUrl}/api/collections/${collection}/records/${id}`, { payload });
+   }
+ 
++  // --- Token-aware record/auth helpers (used by the rules section) ---
++
++  recordsUrl(collection, query = "") {
++    return query
++      ? `${this.baseUrl}/api/collections/${collection}/records?${query}`
++      : `${this.baseUrl}/api/collections/${collection}/records`;
++  }
++
++  listAs(collection, query, token) { return GET(this.recordsUrl(collection, query), { token }); }
++  viewAs(collection, id, token) { return GET(`${this.baseUrl}/api/collections/${collection}/records/${id}`, { token }); }
++  createAs(collection, payload, token) { return POST(this.recordsUrl(collection), { token, payload }); }
++  updateAs(collection, id, payload, token) { return PATCH(`${this.baseUrl}/api/collections/${collection}/records/${id}`, { token, payload }); }
++  deleteAs(collection, id, token) { return DELETE(`${this.baseUrl}/api/collections/${collection}/records/${id}`, { token }); }
++
++  // Create an auth-collection user (seeded as superuser to bypass createRule).
++  async createUser(collection, email, password, extra = {}) {
++    return POST(this.recordsUrl(collection), {
++      token: this.token,
++      payload: { email, password, passwordConfirm: password, ...extra },
++    });
++  }
++
++  async authAs(collection, identity, password) {
++    const res = await POST(`${this.baseUrl}/api/collections/${collection}/auth-with-password`, {
++      payload: { identity, password },
++    });
++    this.assert(res.token, `auth-with-password for ${identity} should return a token`);
++    return res.token;
++  }
++
+   // =========================================================================
+   // Test sections
+   // =========================================================================
+@@ -968,6 +1004,167 @@ class QA {
+     this.log("Relation cascade delete: OK");
+   }
+ 
++  // API access rules. Rules compile to SQL WHERE clauses, so this is the most
++  // MySQL-sensitive area (LIKE escaping, auth-id comparisons, relations...).
++  async sectionRules() {
++    this.log("Testing API access rules...");
++
++    // --- Auth collection + users (exercises auth-collection DDL on MySQL) ---
++    const users = await this.createCollection({
++      type: "auth", name: "qa_users",
++      fields: [{ name: "name", type: "text", required: false, max: 100 }],
++    });
++    const userA = await this.createUser("qa_users", "a@example.com", "password123", { name: "User A", verified: true });
++    const userB = await this.createUser("qa_users", "b@example.com", "password123", { name: "User B", verified: true });
++    const tokenA = await this.authAs("qa_users", "a@example.com", "password123");
++    const tokenB = await this.authAs("qa_users", "b@example.com", "password123");
++    this.log("Rules: auth collection + user auth: OK");
++
++    // --- (1) null rule = superuser only ---
++    await this.createCollection({
++      name: "qa_rules_locked", type: "base",
++      listRule: null, viewRule: null, createRule: null, updateRule: null, deleteRule: null,
++      fields: [{ name: "title", type: "text", required: true, max: 100 }],
++    });
++    // Guest is denied list/create; superuser bypasses the locked rules.
++    await expectStatusOneOf("guest list of locked collection denied", [403, 404], () =>
++      this.listAs("qa_rules_locked", "", undefined));
++    await expectStatusOneOf("guest create on locked collection denied", [400, 403], () =>
++      this.createAs("qa_rules_locked", { title: "x" }, undefined));
++    const lockedRec = await this.createAs("qa_rules_locked", { title: "secret" }, this.token);
++    this.assert(lockedRec.id, "superuser should create on locked collection");
++    await expectStatusOneOf("guest view of locked record denied", [403, 404], () =>
++      this.viewAs("qa_rules_locked", lockedRec.id, undefined));
++    const lockedList = await this.listAs("qa_rules_locked", "", this.token);
++    this.assert(lockedList.totalItems === 1, "superuser should list locked records");
++    this.log("Rules: null rule (superuser-only) enforcement: OK");
++
++    // --- (2) owner-scoped rules with @request.auth.id ---
++    const notes = await this.createCollection({
++      name: "qa_notes", type: "base",
++      listRule: "owner = @request.auth.id",
++      viewRule: "owner = @request.auth.id",
++      createRule: "@request.auth.id != '' && owner = @request.auth.id",
++      updateRule: "owner = @request.auth.id",
++      deleteRule: "owner = @request.auth.id",
++      fields: [
++        { name: "title", type: "text", required: true, max: 100 },
++        { name: "owner", type: "relation", required: true, collectionId: users.id, maxSelect: 1 },
++      ],
++    });
++    void notes;
++
++    // Seed as superuser (bypasses rules): 2 notes for A, 1 for B.
++    const nA1 = await this.createAs("qa_notes", { title: "A one", owner: userA.id }, this.token);
++    await this.createAs("qa_notes", { title: "A two", owner: userA.id }, this.token);
++    const nB1 = await this.createAs("qa_notes", { title: "B one", owner: userB.id }, this.token);
++
++    // List as A → only A's notes (rule filters silently).
++    const listA = await this.listAs("qa_notes", "perPage=100", tokenA);
++    this.assert(listA.totalItems === 2, `userA should see exactly 2 notes, got ${listA.totalItems}`);
++    this.assert(listA.items.every((i) => i.owner === userA.id), "userA list leaked other owners' notes");
++
++    // Guest list → rule "owner = ''" matches nothing.
++    const listGuest = await this.listAs("qa_notes", "perPage=100", undefined);
++    this.assert(listGuest.totalItems === 0, `guest should see 0 notes, got ${listGuest.totalItems}`);
++
++    // View: A can read own, cannot read B's (hidden → 403/404).
++    const ownView = await this.viewAs("qa_notes", nA1.id, tokenA);
++    this.assert(ownView.id === nA1.id, "userA should read own note");
++    await expectStatusOneOf("userA view of userB note denied", [403, 404], () =>
++      this.viewAs("qa_notes", nB1.id, tokenA));
++
++    // Create: guest blocked; A can create own; A cannot create owned-by-B.
++    await expectStatusOneOf("guest create blocked by createRule", [400, 403], () =>
++      this.createAs("qa_notes", { title: "x", owner: userA.id }, undefined));
++    const created = await this.createAs("qa_notes", { title: "A self", owner: userA.id }, tokenA);
++    this.assert(created.id, "userA should create note owned by self");
++    await expectStatusOneOf("userA create owned-by-B blocked", [400, 403], () =>
++      this.createAs("qa_notes", { title: "spoof", owner: userB.id }, tokenA));
++
++    // Update / delete across owners denied; own succeeds.
++    const upd = await this.updateAs("qa_notes", nA1.id, { title: "A one edited" }, tokenA);
++    this.assert(upd.title === "A one edited", "userA should update own note");
++    await expectStatusOneOf("userB update of userA note denied", [403, 404], () =>
++      this.updateAs("qa_notes", nA1.id, { title: "hacked" }, tokenB));
++    await expectStatusOneOf("userB delete of userA note denied", [403, 404], () =>
++      this.deleteAs("qa_notes", nA1.id, tokenB));
++    await this.deleteAs("qa_notes", nB1.id, tokenB); // own delete → 204
++    this.log("Rules: owner-scoped list/view/create/update/delete: OK");
++
++    // --- (3) LIKE operator in a rule (MySQL-sensitive escaping) ---
++    await this.createCollection({
++      name: "qa_rules_like", type: "base",
++      listRule: "title ~ 'public'",
++      viewRule: "title ~ 'public'",
++      createRule: "", updateRule: "", deleteRule: "",
++      fields: [{ name: "title", type: "text", required: true, max: 100 }],
++    });
++    await this.createRecord("qa_rules_like", { title: "public-announcement" });
++    await this.createRecord("qa_rules_like", { title: "public-notice" });
++    await this.createRecord("qa_rules_like", { title: "secret-memo" });
++    // Literal % must be treated as data, not a wildcard, by the rule's LIKE.
++    await this.createRecord("qa_rules_like", { title: "100%-private" });
++
++    const likeList = await this.listAs("qa_rules_like", "perPage=100", undefined);
++    this.assert(likeList.totalItems === 2, `LIKE rule should match 2 'public' rows, got ${likeList.totalItems}`);
++    this.assert(likeList.items.every((i) => i.title.includes("public")), "LIKE rule returned non-matching rows");
++
++    // Combine rule with a user filter using a wildcard char to check escaping.
++    const pctList = await this.listAs("qa_rules_like", `perPage=100&filter=${encodeURIComponent("title ~ 'public'")}`, undefined);
++    this.assert(pctList.totalItems === 2, "LIKE rule + filter mismatch");
++    this.log("Rules: LIKE operator in rule (MySQL escaping): OK");
++
++    // --- (4) != operator in a rule/filter (MySQL uses <> instead of SQLite IS NOT) ---
++    await this.createCollection({
++      name: "qa_rules_not_equal", type: "base",
++      listRule: "status != 'secret'",
++      viewRule: "status != 'secret'",
++      createRule: "", updateRule: "", deleteRule: "",
++      fields: [
++        { name: "title", type: "text", required: true, max: 100 },
++        { name: "status", type: "text", required: true, max: 100 },
++      ],
++    });
++    await this.createRecord("qa_rules_not_equal", { title: "public one", status: "public" });
++    await this.createRecord("qa_rules_not_equal", { title: "draft one", status: "draft" });
++    const secretRec = await this.createRecord("qa_rules_not_equal", { title: "secret one", status: "secret" });
++
++    const notEqualRuleList = await this.listAs("qa_rules_not_equal", "perPage=100", undefined);
++    this.assert(notEqualRuleList.totalItems === 2, `!= rule should expose 2 non-secret rows, got ${notEqualRuleList.totalItems}`);
++    this.assert(notEqualRuleList.items.every((i) => i.status !== "secret"), "!= rule leaked secret row");
++    await expectStatusOneOf("view blocked by != rule", [403, 404], () =>
++      this.viewAs("qa_rules_not_equal", secretRec.id, undefined));
++
++    const notEqualFilterList = await this.listAs(
++      "qa_rules_not_equal",
++      `perPage=100&filter=${encodeURIComponent("status != 'draft'")}`,
++      undefined,
++    );
++    this.assert(notEqualFilterList.totalItems === 1, `!= filter combined with rule should return 1 row, got ${notEqualFilterList.totalItems}`);
++    this.assert(notEqualFilterList.items[0].status === "public", "!= filter returned unexpected row");
++    this.log("Rules: != operator in rule/filter: OK");
++
++    // --- (5) authRule: only verified users may authenticate ---
++    const authRuleCol = await this.createCollection({
++      type: "auth", name: "qa_authrule",
++      authRule: "verified = true",
++      fields: [],
++    });
++    void authRuleCol;
++    await this.createUser("qa_authrule", "ok@example.com", "password123", { verified: true });
++    await this.createUser("qa_authrule", "no@example.com", "password123", { verified: false });
++    const okToken = await this.authAs("qa_authrule", "ok@example.com", "password123");
++    this.assert(okToken, "verified user should authenticate under authRule");
++    await expectStatusOneOf("unverified user blocked by authRule", [400, 403], () =>
++      POST(`${this.baseUrl}/api/collections/qa_authrule/auth-with-password`, {
++        payload: { identity: "no@example.com", password: "password123" },
++      }));
++    this.log("Rules: authRule (verified only): OK");
++
++    this.log("API access rules QA: PASSED");
++  }
++
+   // =========================================================================
+   // Main
+   // =========================================================================
+@@ -990,6 +1187,7 @@ class QA {
+     await this.sectionGeoPoint();
+     await this.sectionPaginationAndDates();
+     await this.sectionCascadeDelete();
++    await this.sectionRules();
+ 
+     // Scan server log for error-level lines or panics. Request-level errors
+     // (e.g. "ERROR POST /api/...") mirror HTTP responses we already assert on
+@@ -1056,6 +1254,11 @@ try {
+   await qa.run();
+ } catch (err) {
+   console.error(err.message || err);
++  // Print server log tail for debugging (server may have logged the error).
++  try {
++    const logTail = qa.tailFile(qa.pbLog, 30);
++    console.error(`\n--- server log tail ---\n${logTail}`);
++  } catch {}
+   cleanupOnce();
+   process.exit(1);
+ } finally {
+diff --git a/tools/search/filter.go b/tools/search/filter.go
+index 9c8a4731..58133658 100644
+--- a/tools/search/filter.go
++++ b/tools/search/filter.go
+@@ -344,6 +344,8 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
+ // `COALESCE(a, "") = ""` since the direct match can be accomplished
+ // with a seek while the COALESCE will induce a table scan.
+ func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
++	isMySQL := strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql")
++
+ 	equalOp := "="
+ 	nullEqualOp := "IS"
+ 	concatOp := "OR"
+@@ -352,8 +354,17 @@ func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
+ 		// always use `IS NOT` instead of `!=` because direct non-equal comparisons
+ 		// to nullable column values that are actually NULL yields to NULL instead of TRUE, eg.:
+ 		// `'example' != nullableColumn` -> NULL even if nullableColumn row value is NULL
+-		equalOp = "IS NOT"
+-		nullEqualOp = equalOp
++		//
++		// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
++		// `IS NOT TRUE`, etc.), so use `<>` for value comparisons while keeping
++		// `IS NOT NULL` for the null check which works in both drivers.
++		if isMySQL {
++			equalOp = "<>"
++			nullEqualOp = "<>"
++		} else {
++			equalOp = "IS NOT"
++			nullEqualOp = equalOp
++		}
+ 		concatOp = "AND"
+ 		nullExpr = "IS NOT NULL"
+ 	}
+-- 
+2.54.0.windows.1
+

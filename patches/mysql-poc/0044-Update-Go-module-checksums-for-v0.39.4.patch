@@ -1,7 +1,7 @@
 From 88c206a7ce7405fef3c075918b4e09580a097d90 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 12:56:20 +0700
-Subject: [PATCH 44/50] Update Go module checksums for v0.39.4
+Subject: [PATCH 44/52] Update Go module checksums for v0.39.4
 
 ---
  go.sum | 6 ++++--
