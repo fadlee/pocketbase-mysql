@@ -1,0 +1,132 @@
+From 3f9d067c049dc00e614d59c76d39381b2ea702c8 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 14:44:19 +0700
+Subject: [PATCH 58/58] Reduce MySQL relation key length and cover composite
+ indexes
+
+---
+ core/field_relation.go       |  2 +-
+ core/field_relation_test.go  | 37 +++++++++++++++++++++++++++++
+ scripts/mysql-runtime-qa.mjs | 45 ++++++++++++++++++++++++++++++++++++
+ 3 files changed, 83 insertions(+), 1 deletion(-)
+
+diff --git a/core/field_relation.go b/core/field_relation.go
+index 66205327..97140abd 100644
+--- a/core/field_relation.go
++++ b/core/field_relation.go
+@@ -159,7 +159,7 @@ func (f *RelationField) ColumnType(app App) string {
+ 	}
+ 
+ 	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
++		return "VARCHAR(15) DEFAULT '' NOT NULL"
+ 	}
+ 
+ 	return "TEXT DEFAULT '' NOT NULL"
+diff --git a/core/field_relation_test.go b/core/field_relation_test.go
+index 501530fe..ce4c6490 100644
+--- a/core/field_relation_test.go
++++ b/core/field_relation_test.go
+@@ -50,6 +50,43 @@ func TestRelationFieldColumnType(t *testing.T) {
+ 	}
+ }
+ 
++func TestRelationFieldMySQLColumnType(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++
++	scenarios := []struct {
++		name     string
++		field    *core.RelationField
++		expected string
++	}{
++		{
++			"single (zero)",
++			&core.RelationField{},
++			"VARCHAR(15) DEFAULT '' NOT NULL",
++		},
++		{
++			"single",
++			&core.RelationField{MaxSelect: 1},
++			"VARCHAR(15) DEFAULT '' NOT NULL",
++		},
++		{
++			"multiple",
++			&core.RelationField{MaxSelect: 2},
++			"JSON NOT NULL",
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			if v := s.field.ColumnType(app); v != s.expected {
++				t.Fatalf("Expected\n%q\ngot\n%q", s.expected, v)
++			}
++		})
++	}
++}
++
+ func TestRelationFieldIsMultiple(t *testing.T) {
+ 	scenarios := []struct {
+ 		name     string
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index 9e3cbd74..b2a1e0cb 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -883,6 +883,51 @@ class QA {
+     // Different value is fine.
+     const ok = await this.createRecord("qa_unique", { sku: "SKU-2", name: "second" });
+     this.assert(ok.id, "non-duplicate unique value should succeed");
++
++    const usersCol = await this.createCollection({
++      type: "auth", name: "qa_index_users",
++      fields: [{ name: "name", type: "text", required: false, max: 100 }],
++    });
++    const user = await this.createUser("qa_index_users", "idx@example.com", "password123", { name: "Index User", verified: true });
++
++    await this.createCollection({
++      name: "qa_notifications", type: "base",
++      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
++      fields: [
++        { name: "recipient_user", type: "relation", required: true, collectionId: usersCol.id, maxSelect: 1 },
++        { name: "type", type: "select", required: true, maxSelect: 1, values: ["payment_request_verified"] },
++        { name: "title", type: "text", required: true, max: 100 },
++        { name: "entity_collection", type: "text", required: true, max: 64 },
++        { name: "entity_id", type: "text", required: true, max: 15 },
++      ],
++      indexes: [
++        "CREATE UNIQUE INDEX idx_qa_notifications_logical_event ON qa_notifications (recipient_user, type, entity_collection, entity_id)",
++      ],
++    });
++    await this.createRecord("qa_notifications", {
++      recipient_user: user.id,
++      type: "payment_request_verified",
++      title: "first",
++      entity_collection: "payment_requests",
++      entity_id: "abc123abc123abc",
++    });
++    await expectStatus("duplicate composite logical event", 400, () =>
++      this.createRecord("qa_notifications", {
++        recipient_user: user.id,
++        type: "payment_request_verified",
++        title: "duplicate",
++        entity_collection: "payment_requests",
++        entity_id: "abc123abc123abc",
++      }));
++    const uniqueComposite = await this.createRecord("qa_notifications", {
++      recipient_user: user.id,
++      type: "payment_request_verified",
++      title: "different entity",
++      entity_collection: "payment_requests",
++      entity_id: "def456def456def",
++    });
++    this.assert(uniqueComposite.id, "non-duplicate composite logical event should succeed");
++
+     this.log("Unique index: OK");
+   }
+ 
+-- 
+2.54.0.windows.1
+
