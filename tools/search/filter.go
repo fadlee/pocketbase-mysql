@@ -344,6 +344,8 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
 // `COALESCE(a, "") = ""` since the direct match can be accomplished
 // with a seek while the COALESCE will induce a table scan.
 func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
+	isMySQL := strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql")
+
 	equalOp := "="
 	nullEqualOp := "IS"
 	concatOp := "OR"
@@ -352,8 +354,17 @@ func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
 		// always use `IS NOT` instead of `!=` because direct non-equal comparisons
 		// to nullable column values that are actually NULL yields to NULL instead of TRUE, eg.:
 		// `'example' != nullableColumn` -> NULL even if nullableColumn row value is NULL
-		equalOp = "IS NOT"
-		nullEqualOp = equalOp
+		//
+		// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
+		// `IS NOT TRUE`, etc.), so use `<>` for value comparisons while keeping
+		// `IS NOT NULL` for the null check which works in both drivers.
+		if isMySQL {
+			equalOp = "<>"
+			nullEqualOp = "<>"
+		} else {
+			equalOp = "IS NOT"
+			nullEqualOp = equalOp
+		}
 		concatOp = "AND"
 		nullExpr = "IS NOT NULL"
 	}
