@@ -1,7 +1,7 @@
 From 5d30a1a00219630891a6be5d927077073d651f1f Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 12:57:12 +0700
-Subject: [PATCH 47/58] Refresh patch stack for v0.39.4
+Subject: [PATCH 47/60] Refresh patch stack for v0.39.4
 
 ---
  ...-document-initial-MySQL-gap-analysis.patch |    4 +-

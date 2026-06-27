@@ -1,0 +1,106 @@
+From b46df7cd47393857826d3481c10c5f25c60cb583 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 14:46:42 +0700
+Subject: [PATCH 60/60] Reduce MySQL select key length for composite indexes
+
+---
+ core/field_select.go         |  9 ++++++++-
+ core/field_select_test.go    | 37 ++++++++++++++++++++++++++++++++++++
+ scripts/mysql-runtime-qa.mjs |  6 ++++--
+ 3 files changed, 49 insertions(+), 3 deletions(-)
+
+diff --git a/core/field_select.go b/core/field_select.go
+index 0d9a8763..0ec2a07a 100644
+--- a/core/field_select.go
++++ b/core/field_select.go
+@@ -3,6 +3,7 @@ package core
+ import (
+ 	"context"
+ 	"database/sql/driver"
++	"fmt"
+ 	"slices"
+ 
+ 	validation "github.com/go-ozzo/ozzo-validation/v4"
+@@ -146,7 +147,13 @@ func (f *SelectField) ColumnType(app App) string {
+ 	}
+ 
+ 	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
++		max := 1
++		for _, value := range f.Values {
++			if len(value) > max {
++				max = len(value)
++			}
++		}
++		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
+ 	}
+ 
+ 	return "TEXT DEFAULT '' NOT NULL"
+diff --git a/core/field_select_test.go b/core/field_select_test.go
+index 093c7011..900a08a0 100644
+--- a/core/field_select_test.go
++++ b/core/field_select_test.go
+@@ -50,6 +50,43 @@ func TestSelectFieldColumnType(t *testing.T) {
+ 	}
+ }
+ 
++func TestSelectFieldMySQLColumnType(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++
++	scenarios := []struct {
++		name     string
++		field    *core.SelectField
++		expected string
++	}{
++		{
++			"single without values",
++			&core.SelectField{MaxSelect: 1},
++			"VARCHAR(1) DEFAULT '' NOT NULL",
++		},
++		{
++			"single with values",
++			&core.SelectField{MaxSelect: 1, Values: []string{"a", "payment_request_verified"}},
++			"VARCHAR(24) DEFAULT '' NOT NULL",
++		},
++		{
++			"multiple",
++			&core.SelectField{MaxSelect: 2, Values: []string{"a", "payment_request_verified"}},
++			"JSON NOT NULL",
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			if v := s.field.ColumnType(app); v != s.expected {
++				t.Fatalf("Expected\n%q\ngot\n%q", s.expected, v)
++			}
++		})
++	}
++}
++
+ func TestSelectFieldIsMultiple(t *testing.T) {
+ 	scenarios := []struct {
+ 		name     string
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index b2a1e0cb..5c7934a7 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -897,8 +897,10 @@ class QA {
+         { name: "recipient_user", type: "relation", required: true, collectionId: usersCol.id, maxSelect: 1 },
+         { name: "type", type: "select", required: true, maxSelect: 1, values: ["payment_request_verified"] },
+         { name: "title", type: "text", required: true, max: 100 },
+-        { name: "entity_collection", type: "text", required: true, max: 64 },
+-        { name: "entity_id", type: "text", required: true, max: 15 },
++        // Keep these text fields unbounded to mirror exported PocketBase migrations
++        // where max=0 would otherwise map to VARCHAR(255) on MySQL.
++        { name: "entity_collection", type: "text", required: true, max: 0 },
++        { name: "entity_id", type: "text", required: true, max: 0 },
+       ],
+       indexes: [
+         "CREATE UNIQUE INDEX idx_qa_notifications_logical_event ON qa_notifications (recipient_user, type, entity_collection, entity_id)",
+-- 
+2.54.0.windows.1
+

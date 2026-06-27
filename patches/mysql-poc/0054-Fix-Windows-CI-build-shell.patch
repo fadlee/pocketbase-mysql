@@ -1,7 +1,7 @@
 From 1f4f8cc5f119f52bd7504d5446b55d9353b2752e Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 14:08:57 +0700
-Subject: [PATCH 54/58] Fix Windows CI build shell
+Subject: [PATCH 54/60] Fix Windows CI build shell
 
 ---
  .github/workflows/build-pocketbase-mysql.yaml   | 1 +

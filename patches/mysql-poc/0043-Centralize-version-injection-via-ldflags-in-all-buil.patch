@@ -1,7 +1,7 @@
 From 7c6b06d5497c86799402fb908ace6b0e3eb6a25b Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 23:48:11 +0700
-Subject: [PATCH 43/58] Centralize version injection via ldflags in all build
+Subject: [PATCH 43/60] Centralize version injection via ldflags in all build
  paths
 
 ---
