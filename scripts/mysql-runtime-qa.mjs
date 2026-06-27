@@ -18,6 +18,8 @@
  *   --mysql-image IMG     Docker image (default: mysql:8.4)
  *   --http-addr ADDR      PocketBase HTTP address (default: 127.0.0.1:18090)
  *   --tmp-dir DIR         Temp directory for QA artifacts
+ *   --keep-tmp            Keep the temp directory after the run (for debugging)
+ *   -h, --help            Show this help text
  */
 
 import { execSync, spawn, spawnSync } from "node:child_process";
@@ -25,7 +27,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { createServer } from "node:net";
+import { createServer, createConnection } from "node:net";
 import http from "node:http";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -48,22 +50,71 @@ function parseArgs() {
     mysqlContainer: process.env.MYSQL_QA_CONTAINER || "pb-mysql-runtime-qa",
     httpAddr: process.env.MYSQL_QA_HTTP_ADDR || "127.0.0.1:18090",
     tmpDir: process.env.MYSQL_QA_TMP_DIR || resolve(tmpdir(), "pb-mysql-runtime-qa"),
+    keepTmp: envBool("MYSQL_QA_KEEP_TMP", false),
+  };
+
+  const need = (i, flag) => {
+    if (i >= args.length) fail(`Missing value for ${flag}`);
+    return args[i];
   };
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
     if (arg === "--skip-docker") opts.skipDocker = true;
-    else if (arg === "--mysql-host") opts.mysqlHost = args[++i];
-    else if (arg === "--mysql-port") opts.mysqlPort = parseInt(args[++i], 10);
-    else if (arg === "--mysql-user") opts.mysqlUser = args[++i];
-    else if (arg === "--mysql-password") opts.mysqlPassword = args[++i];
-    else if (arg === "--mysql-database") opts.mysqlDatabase = args[++i];
-    else if (arg === "--mysql-image") opts.mysqlImage = args[++i];
-    else if (arg === "--mysql-container") opts.mysqlContainer = args[++i];
-    else if (arg === "--http-addr") opts.httpAddr = args[++i];
-    else if (arg === "--tmp-dir") opts.tmpDir = args[++i];
+    else if (arg === "--keep-tmp") opts.keepTmp = true;
+    else if (arg === "-h" || arg === "--help") { printHelp(); process.exit(0); }
+    else if (arg === "--mysql-host") opts.mysqlHost = need(++i, arg);
+    else if (arg === "--mysql-port") opts.mysqlPort = parseInt(need(++i, arg), 10);
+    else if (arg === "--mysql-user") opts.mysqlUser = need(++i, arg);
+    else if (arg === "--mysql-password") opts.mysqlPassword = need(++i, arg);
+    else if (arg === "--mysql-database") opts.mysqlDatabase = need(++i, arg);
+    else if (arg === "--mysql-image") opts.mysqlImage = need(++i, arg);
+    else if (arg === "--mysql-container") opts.mysqlContainer = need(++i, arg);
+    else if (arg === "--http-addr") opts.httpAddr = need(++i, arg);
+    else if (arg === "--tmp-dir") opts.tmpDir = need(++i, arg);
+    else fail(`Unknown argument: ${arg}\nRun with --help for usage.`);
   }
+
+  // Validate
+  if (!Number.isInteger(opts.mysqlPort) || opts.mysqlPort < 1 || opts.mysqlPort > 65535) {
+    fail(`Invalid --mysql-port: must be an integer 1-65535`);
+  }
+  const { port: httpPort } = splitHostPort(opts.httpAddr);
+  if (!Number.isInteger(httpPort) || httpPort < 1 || httpPort > 65535) {
+    fail(`Invalid --http-addr "${opts.httpAddr}": expected host:port with a valid port`);
+  }
+  if (!opts.mysqlDatabase || !/^[A-Za-z0-9_]+$/.test(opts.mysqlDatabase)) {
+    fail(`Invalid --mysql-database "${opts.mysqlDatabase}": use only letters, digits and underscores`);
+  }
+
   return opts;
+}
+
+function fail(msg) {
+  console.error(`[qa] ${msg}`);
+  process.exit(2);
+}
+
+function printHelp() {
+  const header = readFileSync(fileURLToPath(import.meta.url), "utf8")
+    .split(/\r?\n/)
+    .filter((l) => l.startsWith(" *") || l.startsWith("/**"))
+    .map((l) => l.replace(/^\/\*\*?/, "").replace(/^ \*\/?/, "").trimEnd())
+    .join("\n");
+  console.log(header.trim());
+}
+
+// Split "host:port" supporting IPv6 ("[::1]:8090") and bare hosts.
+function splitHostPort(addr) {
+  if (addr.startsWith("[")) {
+    const end = addr.indexOf("]");
+    const host = addr.slice(1, end);
+    const port = parseInt(addr.slice(end + 2), 10);
+    return { host, port };
+  }
+  const idx = addr.lastIndexOf(":");
+  if (idx === -1) return { host: addr, port: NaN };
+  return { host: addr.slice(0, idx), port: parseInt(addr.slice(idx + 1), 10) };
 }
 
 function envBool(name, def) {
@@ -76,43 +127,115 @@ function envBool(name, def) {
 // HTTP helpers
 // ---------------------------------------------------------------------------
 
-function httpRequest(method, url, { token, payload } = {}) {
+const HTTP_TIMEOUT_MS = 30000;
+
+// Marker error so callers can distinguish HTTP 4xx/5xx (a real server response)
+// from transport-level failures (connection refused, timeout, ...).
+class HttpError extends Error {
+  constructor(status, method, url, body) {
+    super(`HTTP ${status} ${method} ${url}\n${body}`);
+    this.name = "HttpError";
+    this.status = status;
+    this.body = body;
+  }
+}
+
+function httpRequestOnce(method, url, { token, payload, headers: extraHeaders, rawBody } = {}) {
   return new Promise((resolve, reject) => {
     const u = new URL(url);
-    const headers = {};
+    const headers = { ...(extraHeaders || {}) };
     let body = null;
 
     if (token) headers["Authorization"] = `Bearer ${token}`;
-    if (payload !== undefined) {
+    if (rawBody !== undefined) {
+      body = rawBody;
+    } else if (payload !== undefined) {
       headers["Content-Type"] = "application/json";
       body = JSON.stringify(payload);
     }
+    if (body != null && headers["Content-Length"] === undefined) {
+      headers["Content-Length"] = Buffer.byteLength(body);
+    }
 
     const req = http.request(
-      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers },
+      { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers, timeout: HTTP_TIMEOUT_MS },
       (res) => {
         const chunks = [];
         res.on("data", (c) => chunks.push(c));
         res.on("end", () => {
           const text = Buffer.concat(chunks).toString("utf8");
           if (res.statusCode >= 400) {
-            reject(new Error(`HTTP ${res.statusCode} ${method} ${url}\n${text}`));
+            reject(new HttpError(res.statusCode, method, url, text));
             return;
           }
-          resolve(text ? JSON.parse(text) : null);
+          if (!text) return resolve(null);
+          try {
+            resolve(JSON.parse(text));
+          } catch {
+            reject(new Error(`Failed to parse JSON response for ${method} ${url}\n${text}`));
+          }
         });
       }
     );
+    req.on("timeout", () => req.destroy(new Error(`Request timed out after ${HTTP_TIMEOUT_MS}ms: ${method} ${url}`)));
     req.on("error", reject);
-    if (body) req.write(body);
+    if (body != null) req.write(body);
     req.end();
   });
+}
+
+// Retry only transport-level errors (not HTTP 4xx/5xx). Useful right after the
+// server reports "Server started" but is still binding the socket.
+async function httpRequest(method, url, opts = {}, { retries = 3, retryDelayMs = 500 } = {}) {
+  let lastErr;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await httpRequestOnce(method, url, opts);
+    } catch (err) {
+      if (err instanceof HttpError) throw err; // real server response, do not retry
+      lastErr = err;
+      if (attempt < retries) await sleep(retryDelayMs);
+    }
+  }
+  throw lastErr;
 }
 
 function GET(url, opts) { return httpRequest("GET", url, opts); }
 function POST(url, opts) { return httpRequest("POST", url, opts); }
 function PATCH(url, opts) { return httpRequest("PATCH", url, opts); }
 function DELETE(url, opts) { return httpRequest("DELETE", url, opts); }
+
+// Assert that a request fails with an expected HTTP status (negative tests).
+async function expectStatus(label, expected, fn) {
+  try {
+    await fn();
+  } catch (err) {
+    if (err instanceof HttpError && err.status === expected) return;
+    throw new Error(`${label}: expected HTTP ${expected} but got: ${err.message}`);
+  }
+  throw new Error(`${label}: expected HTTP ${expected} but request succeeded`);
+}
+
+// Build a multipart/form-data body from string and file fields.
+function buildMultipart(fields = {}, files = []) {
+  const boundary = `----pbqa${Date.now().toString(16)}${Math.random().toString(16).slice(2)}`;
+  const parts = [];
+  for (const [name, value] of Object.entries(fields)) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${name}"\r\n\r\n${value}\r\n`
+    ));
+  }
+  for (const f of files) {
+    parts.push(Buffer.from(
+      `--${boundary}\r\nContent-Disposition: form-data; name="${f.field}"; filename="${f.filename}"\r\n` +
+      `Content-Type: ${f.contentType || "application/octet-stream"}\r\n\r\n`
+    ));
+    parts.push(Buffer.isBuffer(f.content) ? f.content : Buffer.from(f.content));
+    parts.push(Buffer.from("\r\n"));
+  }
+  parts.push(Buffer.from(`--${boundary}--\r\n`));
+  return { body: Buffer.concat(parts), contentType: `multipart/form-data; boundary=${boundary}` };
+}
 
 // ---------------------------------------------------------------------------
 // QA Runner
@@ -128,6 +251,7 @@ class QA {
     this.binary = resolve(this.tmpDir, process.platform === "win32" ? "pocketbase-qa.exe" : "pocketbase-qa");
     this.pbProc = null;
     this.dockerStarted = false;
+    this.succeeded = false;
     this.baseUrl = `http://${opts.httpAddr}`;
     this.token = null;
   }
@@ -153,6 +277,10 @@ class QA {
   }
 
   mysqlDsn() {
+    // NOTE: go-sql-driver/mysql does NOT URL-decode the user/password, so the
+    // credentials are intentionally embedded verbatim. The parser is robust to
+    // special characters as long as the "@tcp(", "/<db>" and "?<params>"
+    // structure stays intact, so no escaping is applied here.
     const creds = this.opts.mysqlPassword
       ? `${this.opts.mysqlUser}:${this.opts.mysqlPassword}`
       : this.opts.mysqlUser;
@@ -170,19 +298,55 @@ class QA {
   cleanup() {
     if (this.pbProc && this.pbProc.exitCode === null) {
       try { this.pbProc.kill(); } catch {}
+      // Give it a moment, then force kill if still alive (esp. on Windows).
+      try {
+        sleepSync(500);
+        if (this.pbProc.exitCode === null) {
+          if (process.platform === "win32") {
+            spawnSync("taskkill", ["/pid", String(this.pbProc.pid), "/f", "/t"], { stdio: "ignore" });
+          } else {
+            this.pbProc.kill("SIGKILL");
+          }
+        }
+      } catch {}
     }
     if (this.dockerStarted) {
       spawnSync("docker", ["rm", "-f", this.opts.mysqlContainer], { stdio: "ignore" });
     }
+    // Keep artifacts on failure (for debugging) or when explicitly requested.
+    if (this.succeeded && !this.opts.keepTmp) {
+      try { rmSync(this.tmpDir, { recursive: true, force: true }); } catch {}
+    } else if (!this.succeeded) {
+      this.logStep(`Artifacts kept for debugging at: ${this.tmpDir}`);
+    }
   }
 
   ensurePortFree() {
-    const [, portStr] = this.opts.httpAddr.split(":");
-    const port = parseInt(portStr, 10);
+    const { port } = splitHostPort(this.opts.httpAddr);
     return new Promise((resolve, reject) => {
       const srv = createServer();
       srv.once("error", () => reject(new Error(`HTTP address ${this.opts.httpAddr} is already in use.`)));
       srv.listen(port, () => { srv.close(); resolve(); });
+    });
+  }
+
+  // mysql CLI password flag; empty password must omit the value entirely.
+  mysqlPwFlag() {
+    return this.opts.mysqlPassword ? [`-p${this.opts.mysqlPassword}`] : [];
+  }
+
+  // Verify an external MySQL is reachable before doing expensive work.
+  ensureMysqlReachable() {
+    if (!this.opts.skipDocker) return;
+    this.logStep(`Checking connectivity to existing MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}...`);
+    return new Promise((resolve, reject) => {
+      const socket = createConnection({ host: this.opts.mysqlHost, port: this.opts.mysqlPort });
+      const timer = setTimeout(() => {
+        socket.destroy();
+        reject(new Error(`Cannot reach MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort} (timeout). Is it running?`));
+      }, 5000);
+      socket.once("connect", () => { clearTimeout(timer); socket.end(); this.logStep("MySQL reachable."); resolve(); });
+      socket.once("error", (err) => { clearTimeout(timer); reject(new Error(`Cannot reach MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}: ${err.message}`)); });
     });
   }
 
@@ -191,14 +355,20 @@ class QA {
       this.logStep(`Skipping Docker - using existing MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}`);
       return;
     }
+    ensureCommand("docker");
     this.logStep(`Removing any previous MySQL container '${this.opts.mysqlContainer}'...`);
     spawnSync("docker", ["rm", "-f", this.opts.mysqlContainer], { stdio: "ignore" });
+
+    // Empty root password requires MYSQL_ALLOW_EMPTY_PASSWORD instead.
+    const pwEnv = this.opts.mysqlPassword
+      ? ["-e", `MYSQL_ROOT_PASSWORD=${this.opts.mysqlPassword}`]
+      : ["-e", "MYSQL_ALLOW_EMPTY_PASSWORD=yes"];
 
     this.logStep(`Starting MySQL container '${this.opts.mysqlContainer}' from ${this.opts.mysqlImage} on port ${this.opts.mysqlPort}...`);
     const r = spawnSync("docker", [
       "run", "--rm", "-d",
       "--name", this.opts.mysqlContainer,
-      "-e", `MYSQL_ROOT_PASSWORD=${this.opts.mysqlPassword}`,
+      ...pwEnv,
       "-e", `MYSQL_DATABASE=${this.opts.mysqlDatabase}`,
       "-p", `${this.opts.mysqlPort}:3306`,
       this.opts.mysqlImage,
@@ -220,9 +390,15 @@ class QA {
     this.logStep(`Waiting for MySQL readiness at ${this.opts.mysqlHost}:${this.opts.mysqlPort} (timeout: 90s)...`);
     let lastError = "";
     for (let i = 1; i <= 90; i++) {
+      // Bail out early if the container died (e.g. bad image / port clash).
+      const alive = spawnSync("docker", ["inspect", "-f", "{{.State.Running}}", this.opts.mysqlContainer], { stdio: "pipe" });
+      if (alive.status === 0 && alive.stdout?.toString().trim() === "false") {
+        const logs = spawnSync("docker", ["logs", "--tail", "40", this.opts.mysqlContainer], { stdio: "pipe" });
+        throw new Error(`MySQL container exited during startup. Logs:\n${logs.stdout?.toString() || ""}${logs.stderr?.toString() || ""}`);
+      }
       const check = spawnSync("docker", [
         "exec", this.opts.mysqlContainer,
-        "mysql", "-h127.0.0.1", `-uroot`, `-p${this.opts.mysqlPassword}`,
+        "mysql", "-h127.0.0.1", `-uroot`, ...this.mysqlPwFlag(),
         this.opts.mysqlDatabase, "-e", "SELECT 1",
       ], { stdio: "pipe" });
       if (check.status === 0) {
@@ -231,7 +407,7 @@ class QA {
       }
       lastError = check.stderr?.toString().trim() || check.stdout?.toString().trim() || lastError;
       this.logWait("MySQL not ready yet", i, 90);
-      spawnSync("sleep", ["1"]);
+      sleepSync(1000);
     }
     throw new Error([
       "MySQL container did not become ready in time.",
@@ -240,6 +416,8 @@ class QA {
   }
 
   buildBinary() {
+    ensureCommand("go");
+    mkdirSync(this.tmpDir, { recursive: true });
     if (existsSync(this.binary)) rmSync(this.binary);
     this.logStep(`Building PocketBase QA binary: ${this.binary}`);
     const r = spawnSync("go", ["build", "-o", this.binary, "./examples/base"], {
@@ -262,7 +440,10 @@ class QA {
     this.logStep(`PocketBase log: ${this.pbLog}`);
     this.pbProc = spawn(
       this.binary,
-      ["serve", "--dir", this.pbData, "--migrationsDir", this.pbMigrations, "--http", this.opts.httpAddr],
+      // --dev=false: the binary lives in the temp dir, which PocketBase would
+      // otherwise treat as "go run" and enable dev mode (printing every request
+      // and SQL statement, polluting the log scan with expected 4xx errors).
+      ["serve", "--dev=false", "--dir", this.pbData, "--migrationsDir", this.pbMigrations, "--http", this.opts.httpAddr],
       { cwd: REPO_ROOT, env: this.mysqlEnv(), stdio: ["ignore", logFd, logFd] }
     );
     closeSync(logFd);
@@ -583,12 +764,218 @@ class QA {
     this.log("All field types QA: PASSED");
   }
 
+  async createRecordMultipart(collection, fields, files) {
+    const { body, contentType } = buildMultipart(fields, files);
+    return POST(`${this.baseUrl}/api/collections/${collection}/records`, {
+      rawBody: body, headers: { "Content-Type": contentType },
+    });
+  }
+
+  // Raw GET returning the response body as a Buffer (for file downloads).
+  downloadBytes(url) {
+    return new Promise((resolveP, reject) => {
+      const u = new URL(url);
+      const req = http.request(
+        { hostname: u.hostname, port: u.port, path: u.pathname + u.search, method: "GET", timeout: HTTP_TIMEOUT_MS },
+        (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => {
+            if (res.statusCode >= 400) return reject(new HttpError(res.statusCode, "GET", url, Buffer.concat(chunks).toString("utf8")));
+            resolveP(Buffer.concat(chunks));
+          });
+        }
+      );
+      req.on("timeout", () => req.destroy(new Error(`Download timed out: ${url}`)));
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  // Negative tests: server must reject invalid input instead of corrupting data.
+  async sectionValidation() {
+    const col = await this.createCollection({
+      name: "qa_validation", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "title", type: "text", required: true, max: 10 },
+        { name: "count", type: "number", required: false, onlyInt: true, min: 0 },
+        { name: "email", type: "email", required: false },
+        { name: "link", type: "url", required: false },
+        { name: "status", type: "select", required: false, values: ["a", "b"], maxSelect: 1 },
+      ],
+    });
+
+    await expectStatus("required field omitted", 400, () =>
+      this.createRecord("qa_validation", { count: 1 }));
+    await expectStatus("text exceeds max length", 400, () =>
+      this.createRecord("qa_validation", { title: "way-too-long-title-value" }));
+    await expectStatus("non-integer for onlyInt number", 400, () =>
+      this.createRecord("qa_validation", { title: "ok", count: 1.5 }));
+    await expectStatus("number below min", 400, () =>
+      this.createRecord("qa_validation", { title: "ok", count: -5 }));
+    await expectStatus("invalid email", 400, () =>
+      this.createRecord("qa_validation", { title: "ok", email: "not-an-email" }));
+    await expectStatus("invalid url", 400, () =>
+      this.createRecord("qa_validation", { title: "ok", link: "not a url" }));
+    await expectStatus("invalid select value", 400, () =>
+      this.createRecord("qa_validation", { title: "ok", status: "zzz" }));
+    await expectStatus("missing record 404", 404, () =>
+      this.getRecord("qa_validation", "nonexistent00000"));
+
+    // A valid record must still succeed after all the rejections.
+    const ok = await this.createRecord("qa_validation", { title: "ok", count: 2, email: "a@b.co", status: "a" });
+    this.assert(ok.id, "valid record should be created");
+    void col;
+    this.log("Validation / negative tests: OK");
+  }
+
+  // Unique index must reject duplicates at the DB level.
+  async sectionUniqueIndex() {
+    await this.createCollection({
+      name: "qa_unique", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "sku", type: "text", required: true, max: 50 },
+        { name: "name", type: "text", required: false, max: 50 },
+      ],
+      indexes: ["CREATE UNIQUE INDEX idx_qa_unique_sku ON qa_unique (sku)"],
+    });
+    await this.createRecord("qa_unique", { sku: "SKU-1", name: "first" });
+    await expectStatus("duplicate unique value", 400, () =>
+      this.createRecord("qa_unique", { sku: "SKU-1", name: "dup" }));
+    // Different value is fine.
+    const ok = await this.createRecord("qa_unique", { sku: "SKU-2", name: "second" });
+    this.assert(ok.id, "non-duplicate unique value should succeed");
+    this.log("Unique index: OK");
+  }
+
+  // File upload via multipart, read-back and download.
+  async sectionFileField() {
+    const col = await this.createCollection({
+      name: "qa_files", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "title", type: "text", required: true, max: 100 },
+        { name: "doc", type: "file", required: false, maxSelect: 1, maxSize: 5242880 },
+        { name: "gallery", type: "file", required: false, maxSelect: 3, maxSize: 5242880 },
+      ],
+    });
+
+    const content = Buffer.from("hello pocketbase file content\n");
+    const rec = await this.createRecordMultipart(
+      "qa_files",
+      { title: "with file" },
+      [
+        { field: "doc", filename: "note.txt", content, contentType: "text/plain" },
+        { field: "gallery", filename: "a.txt", content: "aaa", contentType: "text/plain" },
+        { field: "gallery", filename: "b.txt", content: "bbb", contentType: "text/plain" },
+      ]
+    );
+    this.assert(typeof rec.doc === "string" && rec.doc.length > 0, "doc filename should be stored");
+    this.assert(Array.isArray(rec.gallery) && rec.gallery.length === 2, "gallery should store 2 files");
+
+    const fetched = await this.getRecord("qa_files", rec.id);
+    this.assert(fetched.doc === rec.doc, "doc filename should persist");
+
+    const bytes = await this.downloadBytes(`${this.baseUrl}/api/files/${col.id}/${rec.id}/${rec.doc}`);
+    this.assert(bytes.equals(content), "downloaded file content should match upload");
+
+    this.log("File field upload/download: OK");
+  }
+
+  // GeoPoint create/read/update.
+  async sectionGeoPoint() {
+    await this.createCollection({
+      name: "qa_geo", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "title", type: "text", required: true, max: 100 },
+        { name: "location", type: "geoPoint", required: false },
+      ],
+    });
+    const rec = await this.createRecord("qa_geo", { title: "hq", location: { lon: 106.8456, lat: -6.2088 } });
+    this.assert(rec.location && Math.abs(rec.location.lon - 106.8456) < 1e-6, "geoPoint lon stored");
+    this.assert(Math.abs(rec.location.lat - -6.2088) < 1e-6, "geoPoint lat stored");
+
+    const updated = await this.updateRecord("qa_geo", rec.id, { location: { lon: 0, lat: 0 } });
+    this.assert(updated.location.lon === 0 && updated.location.lat === 0, "geoPoint update");
+    this.log("GeoPoint field: OK");
+  }
+
+  // Pagination, totals, date range filtering and sort stability.
+  async sectionPaginationAndDates() {
+    await this.createCollection({
+      name: "qa_paging", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "title", type: "text", required: true, max: 50 },
+        { name: "seq", type: "number", required: true },
+        { name: "when", type: "date", required: false },
+      ],
+    });
+    const total = 15;
+    for (let i = 1; i <= total; i++) {
+      await this.createRecord("qa_paging", {
+        title: `item-${String(i).padStart(2, "0")}`,
+        seq: i,
+        when: `2026-0${(i % 9) + 1}-15 10:00:00.000Z`,
+      });
+    }
+
+    const page2 = await this.getRecords("qa_paging", "perPage=5&page=2&sort=seq");
+    this.assert(page2.page === 2, "page number");
+    this.assert(page2.perPage === 5, "perPage");
+    this.assert(page2.items.length === 5, "page item count");
+    this.assert(page2.totalItems === total, `totalItems should be ${total}`);
+    this.assert(page2.totalPages === 3, "totalPages");
+    this.assert(page2.items[0].seq === 6, "pagination offset (sorted)");
+
+    const sortedDesc = await this.getRecords("qa_paging", "sort=-seq&perPage=3");
+    this.assert(sortedDesc.items[0].seq === total, "descending sort");
+
+    const ranged = await this.getRecords("qa_paging", `filter=${encodeURIComponent('when >= "2026-05-01"')}`);
+    this.assert(ranged.totalItems >= 1, "date range filter returns results");
+
+    const skipTotal = await this.getRecords("qa_paging", "perPage=5&page=1&skipTotal=1&sort=seq");
+    this.assert(skipTotal.items.length === 5, "skipTotal still returns items");
+    this.log("Pagination / dates: OK");
+  }
+
+  // Relation cascade delete: deleting the parent removes the dependent record.
+  async sectionCascadeDelete() {
+    const owners = await this.createCollection({
+      name: "qa_owners", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [{ name: "name", type: "text", required: true, max: 50 }],
+    });
+    await this.createCollection({
+      name: "qa_pets", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "name", type: "text", required: true, max: 50 },
+        { name: "owner", type: "relation", required: true, collectionId: owners.id, maxSelect: 1, cascadeDelete: true },
+      ],
+    });
+
+    const owner = await this.createRecord("qa_owners", { name: "Alice" });
+    const pet = await this.createRecord("qa_pets", { name: "Rex", owner: owner.id });
+
+    await DELETE(`${this.baseUrl}/api/collections/qa_owners/records/${owner.id}`, { token: this.token });
+
+    await expectStatus("cascade-deleted dependent record gone", 404, () =>
+      this.getRecord("qa_pets", pet.id));
+    this.log("Relation cascade delete: OK");
+  }
+
   // =========================================================================
   // Main
   // =========================================================================
 
   async run() {
+    await this.ensurePortFree();
     this.maybeStartDocker();
+    await this.ensureMysqlReachable();
     this.buildBinary();
     await this.startServer();
     await this.createSuperuserAndAuth();
@@ -597,12 +984,25 @@ class QA {
     await this.sectionSelectAndMatrix();
     await this.sectionRelationsAndView();
     await this.sectionAllFields();
+    await this.sectionValidation();
+    await this.sectionUniqueIndex();
+    await this.sectionFileField();
+    await this.sectionGeoPoint();
+    await this.sectionPaginationAndDates();
+    await this.sectionCascadeDelete();
 
-    // Check server log for errors
+    // Scan server log for error-level lines or panics. Request-level errors
+    // (e.g. "ERROR POST /api/...") mirror HTTP responses we already assert on
+    // (including the intentional negative tests), so they are ignored here; we
+    // only flag panics, fatal/startup errors and other unexpected ERROR output.
     const log = readFileSync(this.pbLog, "utf8");
-    if (log.includes("ERROR")) {
-      throw new Error(`Runtime QA completed but server log contains ERROR entries:\n${log}`);
+    const isRequestErr = (l) => /\bERROR\s+(GET|POST|PATCH|PUT|DELETE|HEAD|OPTIONS)\s+\//.test(l);
+    const badLines = log.split(/\r?\n/).filter((l) =>
+      (/(^|\s)ERROR(\s|$)/.test(l) && !isRequestErr(l)) || /panic:|runtime error|PANIC RECOVER/i.test(l));
+    if (badLines.length > 0) {
+      throw new Error(`Runtime QA completed but server log contains error entries:\n${badLines.join("\n")}\n\n--- full log tail ---\n${this.tailFile(this.pbLog, 60)}`);
     }
+    this.succeeded = true;
     this.log(`\nMySQL runtime QA passed. Logs: ${this.pbLog}`);
   }
 }
@@ -615,6 +1015,21 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Synchronous, cross-platform sleep (works inside spawnSync polling loops).
+function sleepSync(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+// Abort early with a friendly message if a required CLI tool is missing.
+function ensureCommand(cmd) {
+  const probe = process.platform === "win32"
+    ? spawnSync("where", [cmd], { stdio: "ignore" })
+    : spawnSync("which", [cmd], { stdio: "ignore" });
+  if (probe.status !== 0) {
+    throw new Error(`Required command '${cmd}' was not found in PATH. Please install it and retry.`);
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -622,11 +1037,27 @@ function sleep(ms) {
 const opts = parseArgs();
 const qa = new QA(opts);
 
+// Ensure resources are released on Ctrl+C / termination, not just on normal exit.
+let cleanedUp = false;
+function cleanupOnce() {
+  if (cleanedUp) return;
+  cleanedUp = true;
+  try { qa.cleanup(); } catch {}
+}
+for (const sig of ["SIGINT", "SIGTERM", "SIGHUP"]) {
+  process.on(sig, () => {
+    console.error(`\n[qa] Received ${sig}, cleaning up...`);
+    cleanupOnce();
+    process.exit(130);
+  });
+}
+
 try {
   await qa.run();
 } catch (err) {
   console.error(err.message || err);
+  cleanupOnce();
   process.exit(1);
 } finally {
-  qa.cleanup();
+  cleanupOnce();
 }
