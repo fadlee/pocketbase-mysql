@@ -1,7 +1,7 @@
 From ef47481b86ada23d756cde2b095b90c689fb0413 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 22:14:07 +0700
-Subject: [PATCH 40/54] Add AGENTS.md with upgrade checklist and lessons
+Subject: [PATCH 40/56] Add AGENTS.md with upgrade checklist and lessons
  learned, remove bash scripts
 
 ---

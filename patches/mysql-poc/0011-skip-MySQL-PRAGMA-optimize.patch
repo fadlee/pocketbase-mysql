@@ -1,7 +1,7 @@
 From 2150c2179865706ada5363cbfcd04b984bfce056 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 00:46:14 +0700
-Subject: [PATCH 11/54] skip MySQL PRAGMA optimize
+Subject: [PATCH 11/56] skip MySQL PRAGMA optimize
 
 ---
  core/base.go                         |  8 +++++---

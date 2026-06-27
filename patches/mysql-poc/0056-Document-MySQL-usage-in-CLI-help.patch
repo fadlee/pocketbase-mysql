@@ -1,0 +1,133 @@
+From 22fc8038fec998bf35793b7290e80abbb2ae3236 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 14:26:34 +0700
+Subject: [PATCH 56/56] Document MySQL usage in CLI help
+
+---
+ cmd/serve.go  | 42 +++++++++++++++++++++++++++++++++++++++---
+ pocketbase.go | 49 ++++++++++++++++++++++++++++++++++++++++++++++++-
+ 2 files changed, 87 insertions(+), 4 deletions(-)
+
+diff --git a/cmd/serve.go b/cmd/serve.go
+index fbd7a475..88a74087 100644
+--- a/cmd/serve.go
++++ b/cmd/serve.go
+@@ -17,9 +17,45 @@ func NewServeCommand(app core.App, showStartBanner bool) *cobra.Command {
+ 	var httpsAddr string
+ 
+ 	command := &cobra.Command{
+-		Use:          "serve [domain(s)]",
+-		Args:         cobra.ArbitraryArgs,
+-		Short:        "Starts the web server (default to 127.0.0.1:8090 if no domain is specified)",
++		Use:   "serve [domain(s)]",
++		Args:  cobra.ArbitraryArgs,
++		Short: "Starts the web server (default to 127.0.0.1:8090 if no domain is specified)",
++		Long: `Starts the web server (default to 127.0.0.1:8090 if no domain is specified).
++
++MySQL fork usage:
++  SQLite remains the default data DB. To use MySQL for the data DB, set:
++    PB_DATABASE_DRIVER=mysql
++    PB_DATABASE_DSN=<mysql-dsn>
++
++  Example DSN:
++    user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true
++
++  Linux/macOS/Git Bash:
++    PB_DATABASE_DRIVER=mysql \
++    PB_DATABASE_DSN='user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true' \
++    pocketbase-mysql serve
++
++  PowerShell:
++    $env:PB_DATABASE_DRIVER = "mysql"
++    $env:PB_DATABASE_DSN = "user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true"
++    .\pocketbase-mysql.exe serve
++
++  CMD.exe:
++    set PB_DATABASE_DRIVER=mysql
++    set PB_DATABASE_DSN=user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true^&multiStatements=true
++    pocketbase-mysql.exe serve
++
++  DSN notes:
++    parseTime=true        parse MySQL DATE/DATETIME/TIMESTAMP values as Go time values.
++    multiStatements=true  allow migration/schema SQL that contains multiple statements.
++
++  MySQL support:
++    Verified with MySQL 8.4 via the runtime QA suite. Other MySQL 8.x versions may
++    work but are not guaranteed by this fork.
++
++  Fork scope:
++    Only the data DB is routed to MySQL. The auxiliary/log DB remains SQLite.
++    Full upstream PocketBase feature parity is not claimed.`,
+ 		SilenceUsage: true,
+ 		RunE: func(command *cobra.Command, args []string) error {
+ 			// set default listener addresses if at least one domain is specified
+diff --git a/pocketbase.go b/pocketbase.go
+index 91b92c81..24f93bca 100644
+--- a/pocketbase.go
++++ b/pocketbase.go
+@@ -101,7 +101,8 @@ func NewWithConfig(config Config) *PocketBase {
+ 	pb := &PocketBase{
+ 		RootCmd: &cobra.Command{
+ 			Use:     executableName,
+-			Short:   executableName + " CLI",
++			Short:   "PocketBase MySQL fork CLI",
++			Long:    mysqlForkHelp(executableName),
+ 			Version: Version,
+ 			FParseErrWhitelist: cobra.FParseErrWhitelist{
+ 				UnknownFlags: true,
+@@ -161,6 +162,52 @@ func NewWithConfig(config Config) *PocketBase {
+ 	return pb
+ }
+ 
++func mysqlForkHelp(executableName string) string {
++	windowsName := executableName
++	if !strings.HasSuffix(strings.ToLower(windowsName), ".exe") {
++		windowsName += ".exe"
++	}
++
++	return `PocketBase MySQL fork CLI.
++
++SQLite remains the default data DB. To use MySQL for the data DB, configure
++the MySQL connection with environment variables before running serve.
++
++MySQL data DB environment variables:
++  PB_DATABASE_DRIVER=mysql
++  PB_DATABASE_DSN=<mysql-dsn>
++
++Example DSN:
++  user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true
++
++Linux/macOS/Git Bash:
++  PB_DATABASE_DRIVER=mysql \
++  PB_DATABASE_DSN='user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true' \
++  ` + executableName + ` serve
++
++PowerShell:
++  $env:PB_DATABASE_DRIVER = "mysql"
++  $env:PB_DATABASE_DSN = "user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true&multiStatements=true"
++  .\` + windowsName + ` serve
++
++CMD.exe:
++  set PB_DATABASE_DRIVER=mysql
++  set PB_DATABASE_DSN=user:pass@tcp(127.0.0.1:3306)/pocketbase?parseTime=true^&multiStatements=true
++  ` + windowsName + ` serve
++
++DSN notes:
++  parseTime=true        parse MySQL DATE/DATETIME/TIMESTAMP values as Go time values.
++  multiStatements=true  allow migration/schema SQL that contains multiple statements.
++
++MySQL support:
++  Verified with MySQL 8.4 via the runtime QA suite. Other MySQL 8.x versions may
++  work but are not guaranteed by this fork.
++
++Fork scope:
++  Only the data DB is routed to MySQL. The auxiliary/log DB remains SQLite.
++  Full upstream PocketBase feature parity is not claimed.`
++}
++
+ // Start starts the application, aka. registers the default system
+ // commands (serve, superuser, version) and executes pb.RootCmd.
+ func (pb *PocketBase) Start() error {
+-- 
+2.54.0.windows.1
+

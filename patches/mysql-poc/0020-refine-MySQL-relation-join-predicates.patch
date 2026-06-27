@@ -1,7 +1,7 @@
 From 806e45a58b8fbbf205d35e301e97c1f946eb2901 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 02:52:44 +0700
-Subject: [PATCH 20/54] refine MySQL relation join predicates
+Subject: [PATCH 20/56] refine MySQL relation join predicates
 
 ---
  core/record_field_resolver_runner.go | 10 ++++++----
