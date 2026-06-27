@@ -1,7 +1,7 @@
 From cda3080158b1accc07c8e281fd2f1b905a151210 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:41:00 +0700
-Subject: [PATCH 03/48] fix MySQL migration metadata timestamp type
+Subject: [PATCH 03/50] fix MySQL migration metadata timestamp type
 
 ---
  core/migrations_runner.go  | 11 ++++++++++-

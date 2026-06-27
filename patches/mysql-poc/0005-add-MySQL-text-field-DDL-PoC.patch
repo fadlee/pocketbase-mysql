@@ -1,7 +1,7 @@
 From ebe4995367056d3db239a1b1554c781a6852a1f3 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 9 May 2026 23:56:43 +0700
-Subject: [PATCH 05/48] add MySQL text field DDL PoC
+Subject: [PATCH 05/50] add MySQL text field DDL PoC
 
 ---
  core/field.go              | 11 +++++++++++

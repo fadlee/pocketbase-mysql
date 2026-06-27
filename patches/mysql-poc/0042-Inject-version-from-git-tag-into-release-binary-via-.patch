@@ -1,7 +1,7 @@
 From 1f295d5d2c4061615345f506eede9335eaf796a8 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 25 May 2026 23:30:08 +0700
-Subject: [PATCH 42/48] Inject version from git tag into release binary via
+Subject: [PATCH 42/50] Inject version from git tag into release binary via
  ldflags
 
 ---

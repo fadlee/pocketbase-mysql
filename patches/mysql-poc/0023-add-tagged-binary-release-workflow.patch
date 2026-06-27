@@ -1,7 +1,7 @@
 From fc0211df83e8edcaa15dcc00e580bf55185e62a7 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 05:16:28 +0700
-Subject: [PATCH 23/48] add tagged binary release workflow
+Subject: [PATCH 23/50] add tagged binary release workflow
 
 ---
  .../workflows/release-pocketbase-mysql.yaml   | 64 +++++++++++++++++++

@@ -1,7 +1,7 @@
 From 8e0e054c14a9d732f80b670270f1913f60c201fb Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 02:04:51 +0700
-Subject: [PATCH 17/48] fix MySQL schema update matrix
+Subject: [PATCH 17/50] fix MySQL schema update matrix
 
 ---
  core/collection_record_table_sync.go | 179 +++++++++++++++++++++------
