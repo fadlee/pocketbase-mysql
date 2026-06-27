@@ -159,7 +159,7 @@ func (f *RelationField) ColumnType(app App) string {
 	}
 
 	if isMySQLDataDB(app) {
-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+		return "VARCHAR(15) DEFAULT '' NOT NULL"
 	}
 
 	return "TEXT DEFAULT '' NOT NULL"

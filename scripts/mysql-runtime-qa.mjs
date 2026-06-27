@@ -883,6 +883,51 @@ class QA {
     // Different value is fine.
     const ok = await this.createRecord("qa_unique", { sku: "SKU-2", name: "second" });
     this.assert(ok.id, "non-duplicate unique value should succeed");
+
+    const usersCol = await this.createCollection({
+      type: "auth", name: "qa_index_users",
+      fields: [{ name: "name", type: "text", required: false, max: 100 }],
+    });
+    const user = await this.createUser("qa_index_users", "idx@example.com", "password123", { name: "Index User", verified: true });
+
+    await this.createCollection({
+      name: "qa_notifications", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "recipient_user", type: "relation", required: true, collectionId: usersCol.id, maxSelect: 1 },
+        { name: "type", type: "select", required: true, maxSelect: 1, values: ["payment_request_verified"] },
+        { name: "title", type: "text", required: true, max: 100 },
+        { name: "entity_collection", type: "text", required: true, max: 64 },
+        { name: "entity_id", type: "text", required: true, max: 15 },
+      ],
+      indexes: [
+        "CREATE UNIQUE INDEX idx_qa_notifications_logical_event ON qa_notifications (recipient_user, type, entity_collection, entity_id)",
+      ],
+    });
+    await this.createRecord("qa_notifications", {
+      recipient_user: user.id,
+      type: "payment_request_verified",
+      title: "first",
+      entity_collection: "payment_requests",
+      entity_id: "abc123abc123abc",
+    });
+    await expectStatus("duplicate composite logical event", 400, () =>
+      this.createRecord("qa_notifications", {
+        recipient_user: user.id,
+        type: "payment_request_verified",
+        title: "duplicate",
+        entity_collection: "payment_requests",
+        entity_id: "abc123abc123abc",
+      }));
+    const uniqueComposite = await this.createRecord("qa_notifications", {
+      recipient_user: user.id,
+      type: "payment_request_verified",
+      title: "different entity",
+      entity_collection: "payment_requests",
+      entity_id: "def456def456def",
+    });
+    this.assert(uniqueComposite.id, "non-duplicate composite logical event should succeed");
+
     this.log("Unique index: OK");
   }
 

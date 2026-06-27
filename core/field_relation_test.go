@@ -50,6 +50,43 @@ func TestRelationFieldColumnType(t *testing.T) {
 	}
 }
 
+func TestRelationFieldMySQLColumnType(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+
+	scenarios := []struct {
+		name     string
+		field    *core.RelationField
+		expected string
+	}{
+		{
+			"single (zero)",
+			&core.RelationField{},
+			"VARCHAR(15) DEFAULT '' NOT NULL",
+		},
+		{
+			"single",
+			&core.RelationField{MaxSelect: 1},
+			"VARCHAR(15) DEFAULT '' NOT NULL",
+		},
+		{
+			"multiple",
+			&core.RelationField{MaxSelect: 2},
+			"JSON NOT NULL",
+		},
+	}
+
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			if v := s.field.ColumnType(app); v != s.expected {
+				t.Fatalf("Expected\n%q\ngot\n%q", s.expected, v)
+			}
+		})
+	}
+}
+
 func TestRelationFieldIsMultiple(t *testing.T) {
 	scenarios := []struct {
 		name     string
