@@ -1,0 +1,37 @@
+From 1f4f8cc5f119f52bd7504d5446b55d9353b2752e Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Sat, 27 Jun 2026 14:08:57 +0700
+Subject: [PATCH 54/54] Fix Windows CI build shell
+
+---
+ .github/workflows/build-pocketbase-mysql.yaml   | 1 +
+ .github/workflows/release-pocketbase-mysql.yaml | 1 +
+ 2 files changed, 2 insertions(+)
+
+diff --git a/.github/workflows/build-pocketbase-mysql.yaml b/.github/workflows/build-pocketbase-mysql.yaml
+index 9e40167d..3621de59 100644
+--- a/.github/workflows/build-pocketbase-mysql.yaml
++++ b/.github/workflows/build-pocketbase-mysql.yaml
+@@ -43,6 +43,7 @@ jobs:
+           go-version: '1.25.0'
+ 
+       - name: Build pocketbase-mysql
++        shell: bash
+         env:
+           CGO_ENABLED: 0
+           GOOS: ${{ matrix.goos }}
+diff --git a/.github/workflows/release-pocketbase-mysql.yaml b/.github/workflows/release-pocketbase-mysql.yaml
+index 94bc14a1..e879e5ab 100644
+--- a/.github/workflows/release-pocketbase-mysql.yaml
++++ b/.github/workflows/release-pocketbase-mysql.yaml
+@@ -45,6 +45,7 @@ jobs:
+           go-version: '1.25.0'
+ 
+       - name: Build pocketbase-mysql
++        shell: bash
+         env:
+           CGO_ENABLED: 0
+           GOOS: ${{ matrix.goos }}
+-- 
+2.54.0.windows.1
+

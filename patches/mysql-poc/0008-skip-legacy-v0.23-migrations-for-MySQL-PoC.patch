@@ -1,7 +1,7 @@
 From b7aa1a9e55a5abaa1f53958e2a9ec4ebcb164cce Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sun, 10 May 2026 00:19:08 +0700
-Subject: [PATCH 08/52] skip legacy v0.23 migrations for MySQL PoC
+Subject: [PATCH 08/54] skip legacy v0.23 migrations for MySQL PoC
 
 ---
  docs/mysql-gap-analysis.md              | 20 ++++++++++++++++++++
