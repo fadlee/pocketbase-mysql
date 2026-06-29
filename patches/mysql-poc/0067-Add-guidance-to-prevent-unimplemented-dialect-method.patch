@@ -1,0 +1,161 @@
+From 3741914a36b77951e014c3955244a1fe7329eddc Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 08:17:11 +0700
+Subject: [PATCH 67/91] Add guidance to prevent unimplemented dialect methods,
+ clarify incremental interface growth, and expand test/verification
+ requirements
+
+---
+ docs/dialect-refactor-plan.md | 32 ++++++++++++++++++++++++++++----
+ 1 file changed, 28 insertions(+), 4 deletions(-)
+
+diff --git a/docs/dialect-refactor-plan.md b/docs/dialect-refactor-plan.md
+index 49fcc161..29b3af86 100644
+--- a/docs/dialect-refactor-plan.md
++++ b/docs/dialect-refactor-plan.md
+@@ -23,11 +23,19 @@ Replace the ~53 scattered `if isMySQLDataDB(app)` branches with a single `Dialec
+ - **`tools/search.TokenFunctions["strftime"]` is data-query SQL, not aux-only logging.** MySQL must support `strftime(...)` filters through a dialect-aware token-function primitive; do not whitelist it as an ignored SQLite-only helper. By contrast, `geoDistance(...)` uses portable trigonometric functions (`acos`, `cos`, `radians`, `sin`) and remains unchanged unless runtime QA proves otherwise.
+ - **This refactor has intentional public Go API breaks.** Adding `Dialect() Dialect` to `core.App` affects any external code that manually implements the public `core.App` interface. Changing `tools/search.TokenFunctions` callable shape affects direct in-repo and external users of that map. Making `tools/dbutils.JSONEach` SQLite/default-only changes its current env-sensitive behavior for external callers. Capture these breaks in patch notes/release notes instead of treating them as invisible internal cleanup.
+ - **Custom `DBConnect` must use one consistent data driver per app instance.** `PB_DATABASE_DRIVER=mysql` remains an authoritative dialect override for compatibility, including tests. If a custom `BaseAppConfig.DBConnect` ignores that env var and opens SQLite, `app.Dialect()` will still report MySQL. This env-vs-driver mismatch is intentional for focused tests and must not fail validation by itself. The validation scope is only that the concurrent and nonconcurrent data DB handles report the same driver when both expose `DriverName() string`; a single app instance cannot safely use different data drivers for read/write handles.
++- **Do not declare unimplemented dialect capability methods.** If Patch 1 introduces one broad `Dialect` interface with all methods listed below, both `SQLiteDialect` and `MySQLDialect` must provide real, tested implementations for every method in that same patch. Do not add compile-only placeholder methods that return knowingly wrong SQL or panic. Preferred execution is to grow the interface incrementally, or split it into narrow package-internal capability interfaces, so each patch adds only the methods it consumes and tests.
+ 
+ ## Design
+ 
+ ### Dialect interface
+ 
++The final target interface can contain the methods below, but implementation should not force all of them into Patch 1 unless every method is implemented and tested there. To keep patches small and safe, either:
++
++- grow `Dialect` incrementally as each patch migrates a category of call sites, or
++- keep `Dialect` as a small base interface (`Name()` initially) and add narrow capability interfaces used by call sites, for example `ColumnDialect`, `IntrospectionDialect`, `SearchDialect`, `SchemaSyncDialect`, `MaintenanceDialect`, and `MigrationDialect`.
++
++Do not use stubs as a sequencing shortcut. A method should be added to an interface only in the same patch that adds its real implementation, consuming call site, and focused tests.
++
+ New file `core/db_dialect.go` (replaces current content):
+ 
+ ```go
+@@ -158,6 +166,8 @@ type TokenFunctionArg struct {
+ 
+ Both JSON-each methods must expose exactly one column named `value`, with scalar JSON string values usable without JSON quotes for relation/file/select ID comparisons. The MySQL implementation must document the chosen `JSON_TABLE` column type and length. Do not assume `VARCHAR(255)` is always sufficient without checking relation IDs, file values, select values, and request-body arrays; if a wider type is needed and MySQL supports it in `JSON_TABLE`, prefer the wider type or document the truncation tradeoff explicitly. Runtime QA must prove the bound-value behavior for Go `[]byte` JSON payloads and for string array values longer than typical 15-character record IDs.
+ 
++The existing `tools/dbutils.JSONEach` MySQL branch uses `JSON_TABLE(... COLUMNS(value VARCHAR(255) PATH '$'))`. Do not copy that `VARCHAR(255)` assumption into `MySQLDialect.JSONEachColumnExpr(...)` / `JSONEachParamExpr(...)` unless Patch 4C runtime tests prove it is sufficient. Patch 4C acceptance requires either a proven wider/safe column type or explicit documentation of the length tradeoff, plus tests for long scalar values.
++
+ `JSONExtractExpr(column, path)` owns JSON path extraction for JSON/geo filter fields. This closes the current `dbutils.JSONExtract(...)` gap in `RecordFieldResolver`: SQLite keeps the existing `json_valid/json_object/JSON_EXTRACT` wrapper, MySQL uses a matching expression that preserves scalar/string comparison semantics instead of blindly returning quoted JSON strings, and future dialects do not need to touch resolver business logic. The method is intentionally comparison-agnostic: it receives only `column` and `path`, not the operator or right operand type. Therefore the returned MySQL expression must work for string, numeric, and null comparisons without resolver-side hacks; if tests prove this is impossible, revisit this interface before implementation. The MySQL implementation must define and test root path, object path, scalar non-JSON column, string comparison, numeric comparison, and null comparison behavior; do not leave this as an unspecified "MySQL-safe" placeholder. Start by testing an expression such as `CASE WHEN JSON_VALID([[col]]) THEN JSON_UNQUOTE(JSON_EXTRACT([[col]], '$.path')) ELSE JSON_UNQUOTE(JSON_EXTRACT(JSON_OBJECT('pb', [[col]]), '$.pb.path')) END`, but change it if numeric comparison semantics differ from SQLite/PocketBase expectations. Document whether MySQL JSON strings, numbers, objects, arrays, and SQL NULL are returned as unquoted strings or JSON text so equality/null fallback behavior is predictable. After `RecordFieldResolver` is migrated, `dbutils.JSONExtract` is either removed if unused or documented as a SQLite/default helper like `dbutils.JSONEach`.
+ 
+ Treat MySQL `JSONExtractExpr(...)` as a Patch 4C decision gate, not only a generated-SQL cleanup. Before migrating all call sites, prove with runtime MySQL that the chosen expression preserves numeric ordering, string equality, object/array text behavior, and null fallback semantics. If one comparison-agnostic expression cannot preserve both string and numeric behavior, stop and revise the interface (for example by making JSON extraction operator-aware or by carrying resolver metadata) instead of adding resolver-side hacks after migration.
+@@ -200,6 +210,7 @@ func DialectForDriver(driverName string) Dialect {
+ - **Do not** switch to "driver name only" — that was the original (rejected) idea and it breaks the env-var-only column-type tests described in Current State.
+ - Because the affected tests call `t.Setenv(...)` **after** `NewTestApp()` (i.e. after `initDataDB` already ran), Patch 1 or Patch 2 must update those tests before the call sites switch to cached `app.Dialect()` semantics. Patch 7 only verifies no behavior tests still use env mutation. Avoid exposing a public or test-only dialect setter solely for these tests unless a future non-test use case appears.
+ - `IsMySQLDataDB` is kept during transition, removed in Patch 7. To keep Patch 1 behavior-neutral, either keep the wrapper on the old lazy env-var-first logic until the post-boot env-var tests are migrated, or migrate those tests in Patch 1 before switching the wrapper to `return app.Dialect().Name() == "mysql"`. Do not claim Patch 1 is behavior-neutral if the wrapper immediately uses the cached boot-time dialect while tests still mutate `PB_DATABASE_DRIVER` after boot.
++- After `ResetBootstrapState()`, the cached dialect is cleared and `Dialect()` falls back to env/driver detection again because the app is unbootstrapped. This means changing `PB_DATABASE_DRIVER` after reset can change the fallback result until the next bootstrap. Add focused coverage for this behavior rather than treating it as a stale-cache bug.
+ 
+ ### tools/search wiring (no new package needed)
+ 
+@@ -229,6 +240,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `record_field_resolver_runner.go`: request-body `@request.body.<field>:each` joins currently hardcode `json_each({:param})`; replace them with `app.Dialect().JSONEachParamExpr(paramName)` where `paramName` is the bare dbx parameter name without `{:...}`. MySQL can use a `JSON_TABLE({:param}, '$[*]' COLUMNS(value ... PATH '$'))` expression. The returned table-valued expression must expose a column named `value` and must not include an alias; existing callers continue to alias the join and reference `[[alias.value]]`. Use the dialect's documented `value` column type consistently for relation/file/select IDs and add runtime coverage proving string JSON array values compare correctly against record IDs without JSON quote mismatches or silent truncation.
+ - `record_field_resolver_runner.go`: validate the MySQL `JSONEachParamExpr(...)` implementation with runtime MySQL because request body `:each` binds `json.Marshal(...)` output as a Go `[]byte`. If MySQL requires casting or string conversion, implement the dialect expression accordingly (for example `JSON_TABLE(CAST({:param} AS JSON), ...)` if that is what the driver requires) rather than assuming plain `JSON_TABLE({:param}, ...)` works.
+ - MySQL JSON table-valued expression support targets MySQL 8.x. MariaDB compatibility is not part of this refactor unless explicitly added and runtime-tested; `JSON_TABLE` and JSON casting behavior differ across engines/versions.
++- Runtime QA must assert the database engine/version before JSON_TABLE-dependent tests run. When `--skip-docker` points at MariaDB or an old MySQL version, fail early with an explicit unsupported-engine message rather than surfacing confusing SQL syntax/runtime failures.
+ - `record_field_resolver_runner.go`: multivalue `:length` currently uses SQLite `dbutils.JSONArrayLength(...)`; replace it with `app.Dialect().JSONArrayLengthExpr(column)` or explicitly mark `:length` as an out-of-scope MySQL gap before implementation. Prefer migrating it in this refactor because it is query-generation dialect behavior.
+ - Generic `tools/search` resolvers without dialect primitive methods default to SQLite behavior. MySQL behavior is provided by resolvers like `RecordFieldResolver` that implement the primitive methods; `tools/search` must not infer the data dialect from env vars.
+ - `tools/search.SimpleFieldResolver` JSON path extraction remains SQLite/default behavior unless a future resolver primitive is introduced. This is intentional because generic search resolvers have no app/dialect context; do not add env-var detection there.
+@@ -296,8 +308,8 @@ The custom `DBConnect` is intentional. With the default connector, setting `PB_D
+ **Files:**
+ - `core/db_dialect.go` — rewrite: add `Dialect` interface, `SQLiteDialect`, `MySQLDialect`, `DialectForDriver(name string) Dialect` factory; import/use `tools/search.EqualityOperators` rather than defining the type in `core`
+ - `core/db_dialect.go` — add dialect name constants (`DialectSQLiteName`, `DialectMySQLName`) and use them for non-test dialect name comparisons instead of raw string literals
+-- `core/db_dialect.go` — add compile-time assertions `var _ Dialect = SQLiteDialect{}` and `var _ Dialect = MySQLDialect{}`. Patch 1 may implement simple methods immediately, but complex SQL-generation methods should either have focused method-level tests in Patch 1 or be implemented in the first patch that consumes them.
+-- If Patch 1 implements complex methods before their call sites migrate (`StrftimeExpr`, `JSONExtractExpr`, schema conversion SQL, maintenance, and system DDL), add focused method-level tests in Patch 1. Otherwise, keep Patch 1 to interface/factory/simple wiring and move complex method implementation/testing into the first patch that consumes each method. Do not leave compile-only implementations that return knowingly wrong SQL.
++- `core/db_dialect.go` — add compile-time assertions only for the capability interfaces introduced in this patch, for example `var _ Dialect = SQLiteDialect{}` / `var _ Dialect = MySQLDialect{}` if Patch 1 keeps `Dialect` small. If Patch 1 introduces a broad final interface, it must also add real implementations and focused tests for every method in that interface.
++- If Patch 1 implements complex methods before their call sites migrate (`StrftimeExpr`, `JSONExtractExpr`, schema conversion SQL, maintenance, and system DDL), add focused method-level tests in Patch 1. Otherwise, keep Patch 1 to interface/factory/simple wiring and move each complex method into the first patch that consumes it. Do not leave compile-only implementations that return knowingly wrong SQL.
+ - `tools/search/filter.go` or `tools/search/simple_field_resolver.go` — add the `EqualityOperators` value type used by `tools/search` and returned by `core.Dialect.EqualityOperators()`
+ - `tools/search/token_functions.go` — add the `TokenFunctionArg` value type used by dialect-aware `strftime(...)`
+ - `core/base.go` — add `dialect Dialect` field to `BaseApp` struct, set in `initDataDB()`, add nil-safe `Dialect()` method
+@@ -307,10 +319,13 @@ The custom `DBConnect` is intentional. With the default connector, setting `PB_D
+ - `core/base.go` `ResetBootstrapState()` — clear `app.dialect = nil` together with DB handles so re-bootstrap cannot observe stale dialect state
+ - `core/app.go` — add `Dialect() Dialect` to `App` interface
+ - `core/app.go` — document this as an intentional public Go API break for external code that manually implements `core.App`
++- `pocketbase.go` — keep in Patch 1 verification scope because it has `var _ core.App = (*PocketBase)(nil)` and embeds `core.App`. It should continue compiling after `BaseApp` implements `Dialect()`, but this public wrapper conformance must be checked explicitly.
++- Public API note: external structs that embed `core.App` should inherit the new method through the embedded interface, while external structs that manually implement the full `core.App` interface must add `Dialect() Dialect`.
+ - Keep `isMySQLDataDB` and `IsMySQLDataDB` without behavior change until env-var-only tests are migrated. Either keep their old lazy env-var-first logic in Patch 1, or move the affected test updates into Patch 1 before changing the wrappers to `return app.Dialect().Name() == "mysql"`.
+ - While wrappers still exist, make `IsMySQLDataDB(nil)` and unbootstrapped app values nil-safe. The wrapper must continue env-var-first behavior without panicking when `ConcurrentDB()` is nil.
+ - Do not add a public `SetDialect` or test-only dialect injection helper for this refactor. If Patch 0 Path A passes, migrate env-var-only tests by setting `PB_DATABASE_DRIVER=mysql` before booting a SQLite-backed test app with the focused custom connector, or replace them with narrower dialect method tests. If Path B applies, keep wrappers lazy and redesign those tests before switching wrappers or call sites to cached dialect behavior.
+ - Add focused tests for `Dialect()` before bootstrap, after SQLite bootstrap, env-forced MySQL bootstrap, data transaction inheritance, nested aux-to-data transaction inheritance (`AuxRunInTransaction` followed by `RunInTransaction`), aux transaction preserving the data dialect without treating aux operations as data-dialect operations, `UnsafeWithoutHooks().Dialect()`, and `ResetBootstrapState()` clearing stale dialect state.
++- Add focused tests for `Dialect()` fallback after `ResetBootstrapState()` when `PB_DATABASE_DRIVER` changes while the app is unbootstrapped. This documents that fallback detection is environment-sensitive only when no cached boot-time dialect exists.
+ - Add focused tests for `IsMySQLDataDB(nil)` and an unbootstrapped app while the transitional wrappers still exist.
+ - Suggested test placement: pure factory tests in `core/db_dialect_test.go`; bootstrap/reset/unsafe-copy tests in `core/base_test.go`; transaction inheritance tests in `core/db_tx_test.go`.
+ 
+@@ -318,6 +333,7 @@ The custom `DBConnect` is intentional. With the default connector, setting `PB_D
+ - `go build ./...` passes
+ - `go test ./...` passes
+ - `go test -tags no_default_driver ./core` or an equivalent no-default-driver compile/test target passes; if the full package test suite cannot run under this tag because custom `DBConnect` setup is required, document the narrower compile target used
++- Do not assume the Patch 0 SQLite-backed spike also validates `no_default_driver`: under that tag the default SQLite driver blank import from `core/db_connect.go` is excluded. If a no-default-driver test opens SQLite through custom `DBConnect`, the test package must import the SQLite driver explicitly or use a compile-only target that does not open SQLite.
+ - No behavior change if call sites still use `isMySQLDataDB` wrappers; if wrappers now use `app.Dialect()`, the post-boot env-var mutation tests must already be migrated in this patch
+ 
+ ### Patch 2: Migrate ColumnType call sites (re-grep before and after)
+@@ -351,7 +367,7 @@ The custom `DBConnect` is intentional. With the default connector, setting `PB_D
+ - `core/db_table.go:151` `HasTable` — `app.Dialect().HasTableQuery()`
+ - `core/collection_record_table_sync.go:181` `recordTableExistsForSchemaSync` — execute `txApp.Dialect().HasTableQuery()` through `txApp.DB()` so schema-sync existence checks observe transaction state. Do not fall back to `app.HasTable(tableName)` from inside this transaction-sensitive helper.
+ - `core/collection_record_table_sync.go:236` view lookup — `txApp.Dialect().ViewsQuery()`
+-- `core/collection_validate.go:565` index name validation — `cv.app.Dialect().TableIndexesQuery()` (cross-table index check)
++- `core/collection_validate.go:565` index name validation — this is a cross-table index-owner lookup, not the same shape as table-scoped introspection. Either add a dedicated dialect method such as `IndexOwnerQuery() string`, or explicitly define `TableIndexesQuery()` so it can support this call with `oldName`, `newName`, and `indexName` params and return the owning table name. The current MySQL branch selects `TABLE_NAME` from `information_schema.STATISTICS`; the SQLite branch selects `tbl_name` from `sqlite_master`. Preserve that result semantics and add duplicate-index-name validation coverage for both dialects.
+ 
+ **Verification:** `go build ./...` + `go test ./...`
+ 
+@@ -424,12 +440,14 @@ Move only these items from the aggregate Patch 4 checklist:
+ - `tools/search/filter.go` equality operators, LIKE column-operand formatting, resolver primitive threading, and `manyVsManyExpr` / `manyVsOneExpr` captured primitives
+ - `tools/search/sort.go` `@rowid` resolver primitive
+ - `tools/search/provider.go` `@rowid` prefixing review
++- `ui/src/apiPreview/docsList.js` `@rowid` API-preview wording. The current UI says `@rowid` is SQLite-specific and MySQL apps should use portable fields. If this split makes `@rowid` resolve through the dialect and map to `id` on MySQL, update the docs to match the new behavior. If the project commits built UI assets, regenerate `ui/dist` after the source update.
+ 
+ Required tests:
+ - `tools/search/filter_test.go` resolver-backed MySQL equality and LIKE column-operand tests without `PB_DATABASE_DRIVER`
+ - `tools/search/filter_test.go` same-process cache-safety test that builds equivalent filters with SQLite/default and MySQL-primitive resolvers in both orders
+ - `tools/search/sort_test.go` resolver-backed `@rowid` tests proving env vars are ignored
+ - `tools/search/provider_test.go` or `tools/search/sort_test.go` provider-level `@rowid` prefixing tests
++- Manual/UI verification if docs are updated: confirm the API preview no longer claims `@rowid` is unusable on MySQL, or explicitly keeps a documented warning if the team wants to discourage it despite compatibility mapping.
+ 
+ Verification:
+ - `go build ./...`
+@@ -483,11 +501,13 @@ Required tests:
+ - `core/record_field_resolver_test.go` main-query `:each` and request-body `:each` joins prove table-valued expressions are not quoted as table names
+ - `tools/dbutils/json_test.go` `JSONEach` remains SQLite-only and ignores `PB_DATABASE_DRIVER=mysql`
+ - `scripts/mysql-runtime-qa.mjs` or focused runtime spike — MySQL JSON extraction numeric ordering, string equality, null fallback, object/array behavior, and JSON_TABLE scalar string length behavior
++- `scripts/mysql-runtime-qa.mjs` — add an engine/version preflight before JSON_TABLE-dependent checks. Query `SELECT VERSION()` (or equivalent) and fail early with a clear unsupported-engine message for MariaDB or MySQL versions without the required JSON_TABLE behavior.
+ 
+ Verification:
+ - `go build ./...`
+ - `go test ./...`
+ - Runtime MySQL spike/QA for JSON extraction numeric ordering, string equality, null fallback, object/array behavior, and JSON_TABLE scalar string length behavior must pass before Patch 4C is considered complete. Generated SQL tests alone are not sufficient for this split.
++- Patch 4C is not complete until the chosen `JSON_TABLE` `value` column type/length is proven by runtime coverage or explicitly documented. Do not leave an unreviewed `VARCHAR(255)` copy from the old `dbutils.JSONEach` branch.
+ - `grep -rn "dbutils.JSONEach(" core/` returns zero results unless every remaining occurrence is explicitly documented as SQLite-only and safe
+ - `grep -rn "dbutils.JSONExtract(" core/` returns zero results unless every remaining occurrence is explicitly documented as SQLite-only and safe
+ 
+@@ -602,7 +622,8 @@ Verification:
+ - `grep -rn "os.Getenv(.*PB_DATABASE_DRIVER\|PB_DATABASE_DRIVER" tools/search tools/dbutils core migrations apis forms cmd plugins pocketbase.go` returns only approved detection/connect/help/test locations described above
+ - Runtime QA: `node scripts/mysql-runtime-qa.mjs --skip-docker --mysql-port 3306 --mysql-password "" --mysql-database pocketbase_qa`
+ - Refresh docs that describe MySQL gaps/runtime coverage if behavior changed: at minimum review `docs/mysql-gap-analysis.md`, `docs/mysql-upstream-workflow.md`, and `AGENTS.md`.
+-- Export patch stack as the final implementation step: `node scripts/export-mysql-patches.mjs v0.39.4` (or the current upstream baseline if it changed). Review the generated `patches/mysql-poc/` diff and commit it separately if following the repo's patch-stack workflow.
++- If `@rowid` behavior was changed to be dialect-backed, confirm the API preview docs in `ui/src/apiPreview/docsList.js` and committed `ui/dist` bundle no longer contradict the new behavior.
++- Export patch stack as the final implementation step: `node scripts/export-mysql-patches.mjs v0.39.4` (or the current upstream baseline if it changed). Before exporting, confirm the baseline tag from `AGENTS.md`, the current branch history/merge-base, or existing patch-stack metadata so this command does not accidentally export against a stale upstream tag. Review the generated `patches/mysql-poc/` diff and commit it separately if following the repo's patch-stack workflow.
+ 
+ ## Key Design Decisions
+ 
+@@ -662,6 +683,8 @@ Verification:
+ | `tools/search/provider.go` | 4A, 4E |
+ | `tools/search/token_functions.go` | 1, 4D |
+ | `tools/search/multi_match_subquery.go` | 4B |
++| `ui/src/apiPreview/docsList.js` | 4A if `@rowid` semantics become dialect-backed |
++| `ui/dist/` | 4A if UI docs source changes and built assets are committed |
+ | `tools/dbutils/json.go` | 4C, 7 |
+ | `tools/dbutils/json_test.go` | 4C |
+ | `tools/search/filter_test.go` | 4A |
+@@ -684,6 +707,7 @@ Verification:
+ | `core/migrations_runner.go` | 6 |
+ | `core/field_select_test.go` | 1 or 2 (remove post-boot env-var mutation), 7 verification |
+ | `core/field_relation_test.go` | 1 or 2 (remove post-boot env-var mutation), 7 verification |
++| `pocketbase.go` | 1 verification for `core.App` conformance, 7 env-var help-text whitelist |
+ 
+ ## Risk & Rollback
+ 
+-- 
+2.54.0.windows.1
+

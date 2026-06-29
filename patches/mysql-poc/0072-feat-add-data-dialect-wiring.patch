@@ -1,0 +1,428 @@
+From 27f82b34fef0e133a0992056ac2630a9bbe4637f Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 10:45:52 +0700
+Subject: [PATCH 72/91] feat: add data dialect wiring
+
+---
+ core/app.go             |  7 ++++
+ core/base.go            | 89 +++++++++++++++++++++++++++++++++++------
+ core/base_test.go       | 88 ++++++++++++++++++++++++++++++++++++++++
+ core/db_dialect.go      | 44 ++++++++++++++++++++
+ core/db_dialect_test.go | 40 ++++++++++++++++++
+ core/db_tx_test.go      | 34 ++++++++++++++++
+ 6 files changed, 289 insertions(+), 13 deletions(-)
+
+diff --git a/core/app.go b/core/app.go
+index 089c4e07..3054cc99 100644
+--- a/core/app.go
++++ b/core/app.go
+@@ -42,6 +42,13 @@ type App interface {
+ 	// (aka. whether Bootstrap() was called).
+ 	IsBootstrapped() bool
+ 
++	// Dialect returns the SQL dialect used by the app's data database.
++	//
++	// For an unbootstrapped app (or after ResetBootstrapState()) it
++	// falls back to DialectForDriver(""), which honors the
++	// PB_DATABASE_DRIVER env var, defaulting to SQLite.
++	Dialect() Dialect
++
+ 	// IsTransactional checks if the current app instance is part of a transaction.
+ 	IsTransactional() bool
+ 
+diff --git a/core/base.go b/core/base.go
+index dacad3ec..e1f0fde4 100644
+--- a/core/base.go
++++ b/core/base.go
+@@ -84,6 +84,7 @@ type BaseApp struct {
+ 	nonconcurrentDB     dbx.Builder
+ 	auxConcurrentDB     dbx.Builder
+ 	auxNonconcurrentDB  dbx.Builder
++	dialect             Dialect
+ 
+ 	// app event hooks
+ 	onBootstrap     *hook.Hook[*BootstrapEvent]
+@@ -384,6 +385,35 @@ func (app *BaseApp) IsBootstrapped() bool {
+ 	return app.concurrentDB != nil && app.auxConcurrentDB != nil
+ }
+ 
++// Dialect returns the cached data database dialect of the app.
++//
++// When the app is not bootstrapped (or after ResetBootstrapState()) the
++// cached dialect is nil and the method falls back to DialectForDriver,
++// which honors the PB_DATABASE_DRIVER env var and defaults to SQLite.
++func (app *BaseApp) Dialect() Dialect {
++	if app.dialect != nil {
++		return app.dialect
++	}
++
++	return DialectForDriver(driverNameFrom(app.ConcurrentDB()))
++}
++
++// driverNameFrom extracts the underlying driver name from a dbx.Builder
++// using the optional DriverName() string interface. Returns an empty
++// string when the builder is nil or doesn't expose DriverName().
++func driverNameFrom(db dbx.Builder) string {
++	if db == nil {
++		return ""
++	}
++	type driverNamer interface {
++		DriverName() string
++	}
++	if v, ok := db.(driverNamer); ok {
++		return v.DriverName()
++	}
++	return ""
++}
++
+ // Bootstrap initializes the application
+ // (aka. create data dir, open db connections, load settings, etc.).
+ //
+@@ -407,23 +437,34 @@ func (app *BaseApp) Bootstrap() error {
+ 			return err
+ 		}
+ 
+-		if err := app.initAuxDB(); err != nil {
+-			return err
+-		}
++		// wrap the remaining bootstrap steps so that any failure after
++		// the data DB handles have opened cleans up the partially
++		// allocated resources (data + aux DB handles, etc.).
++		if err := func() error {
++			if err := app.initAuxDB(); err != nil {
++				return err
++			}
+ 
+-		if err := app.initLogger(); err != nil {
+-			return err
+-		}
++			if err := app.initLogger(); err != nil {
++				return err
++			}
+ 
+-		if err := app.RunSystemMigrations(); err != nil {
+-			return err
+-		}
++			if err := app.RunSystemMigrations(); err != nil {
++				return err
++			}
+ 
+-		if err := app.ReloadCachedCollections(); err != nil {
+-			return err
+-		}
++			if err := app.ReloadCachedCollections(); err != nil {
++				return err
++			}
+ 
+-		if err := app.ReloadSettings(); err != nil {
++			if err := app.ReloadSettings(); err != nil {
++				return err
++			}
++
++			return nil
++		}(); err != nil {
++			// release any partially opened DB resources before returning
++			_ = app.ResetBootstrapState()
+ 			return err
+ 		}
+ 
+@@ -472,6 +513,11 @@ func (app *BaseApp) ResetBootstrapState() error {
+ 		*db = nil
+ 	}
+ 
++	// clear the cached data dialect so that Dialect() falls back to
++	// DialectForDriver (which honors PB_DATABASE_DRIVER env) until the
++	// app is bootstrapped again.
++	app.dialect = nil
++
+ 	if len(errs) > 0 {
+ 		return errors.Join(errs...)
+ 	}
+@@ -1185,12 +1231,25 @@ func (app *BaseApp) initDataDB() error {
+ 
+ 	nonconcurrentDB, err := app.config.DBConnect(dbPath)
+ 	if err != nil {
++		// close the already opened concurrent handle before returning
++		_ = concurrentDB.Close()
+ 		return err
+ 	}
+ 	nonconcurrentDB.DB().SetMaxOpenConns(1)
+ 	nonconcurrentDB.DB().SetMaxIdleConns(1)
+ 	nonconcurrentDB.DB().SetConnMaxIdleTime(3 * time.Minute)
+ 
++	// validate that both data handles use the same driver when both
++	// expose DriverName() string.
++	concurrentDriver := concurrentDB.DriverName()
++	nonconcurrentDriver := nonconcurrentDB.DriverName()
++	if concurrentDriver != "" && nonconcurrentDriver != "" &&
++		!strings.EqualFold(concurrentDriver, nonconcurrentDriver) {
++		_ = concurrentDB.Close()
++		_ = nonconcurrentDB.Close()
++		return fmt.Errorf("data db driver mismatch: concurrent=%q nonconcurrent=%q", concurrentDriver, nonconcurrentDriver)
++	}
++
+ 	if app.IsDev() {
+ 		nonconcurrentDB.QueryLogFunc = func(ctx context.Context, t time.Duration, sql string, rows *sql.Rows, err error) {
+ 			color.HiBlack("[%.2fms] %v\n", float64(t.Milliseconds()), normalizeSQLLog(sql))
+@@ -1205,6 +1264,10 @@ func (app *BaseApp) initDataDB() error {
+ 	app.concurrentDB = concurrentDB
+ 	app.nonconcurrentDB = nonconcurrentDB
+ 
++	// cache the data dialect based on the concurrent handle driver name
++	// (DialectForDriver also honors the PB_DATABASE_DRIVER env override).
++	app.dialect = DialectForDriver(concurrentDriver)
++
+ 	return nil
+ }
+ 
+diff --git a/core/base_test.go b/core/base_test.go
+index 5555e020..d0b515f1 100644
+--- a/core/base_test.go
++++ b/core/base_test.go
+@@ -568,3 +568,91 @@ func TestBaseAppTriggerOnTerminate(t *testing.T) {
+ 	app.OnTerminate().Trigger(event)
+ 	app.OnTerminate().Trigger(event)
+ }
++
++func TestUnbootstrappedAppDialectIsSQLiteByDefault(t *testing.T) {
++	const testDataDir = "./pb_base_app_dialect_unboot_data_dir/"
++	defer os.RemoveAll(testDataDir)
++
++	app := core.NewBaseApp(core.BaseAppConfig{
++		DataDir: testDataDir,
++	})
++
++	// unbootstrapped app should be nil-safe and return SQLite by default
++	d := app.Dialect()
++	require := func(cond bool, msg string) {
++		if !cond {
++			t.Fatal(msg)
++		}
++	}
++	require(d != nil, "expected non-nil dialect for unbootstrapped app")
++	require(d.Name() == core.DialectSQLiteName, "expected SQLite dialect for unbootstrapped app without env override")
++}
++
++func TestResetBootstrapStateClearsCachedDialect(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	// after bootstrap, dialect should be cached and SQLite (test app uses sqlite)
++	d := app.Dialect()
++	if d == nil || d.Name() != core.DialectSQLiteName {
++		t.Fatalf("expected cached SQLite dialect after bootstrap, got %v", d)
++	}
++
++	// reset should clear the cached dialect
++	if err := app.ResetBootstrapState(); err != nil {
++		t.Fatal(err)
++	}
++
++	// after reset, Dialect() should fall back to DialectForDriver which checks env.
++	// No env override set, so it should still be SQLite.
++	d = app.Dialect()
++	if d == nil || d.Name() != core.DialectSQLiteName {
++		t.Fatalf("expected SQLite dialect after reset without env override, got %v", d)
++	}
++}
++
++func TestResetBootstrapStateDialectFallbackObservesEnv(t *testing.T) {
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++
++	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
++		DBConnect: func(dbPath string) (*dbx.DB, error) {
++			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
++			return dbx.Open("sqlite", dbPath+pragmas)
++		},
++	})
++	require := func(cond bool, msg string) {
++		if !cond {
++			t.Fatal(msg)
++		}
++	}
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer app.Cleanup()
++
++	// env-forced: even with sqlite-backed test app, dialect should be MySQL
++	d := app.Dialect()
++	require(d != nil, "expected non-nil dialect with env override")
++	require(d.Name() == core.DialectMySQLName, "expected MySQL dialect with env override")
++
++	if err := app.ResetBootstrapState(); err != nil {
++		t.Fatal(err)
++	}
++
++	// after reset, fallback should still observe env and return MySQL
++	d = app.Dialect()
++	require(d != nil, "expected non-nil dialect after reset with env override")
++	require(d.Name() == core.DialectMySQLName, "expected MySQL dialect after reset with env override")
++}
++
++func TestUnsafeWithoutHooksPreservesDialect(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	clone := app.UnsafeWithoutHooks()
++
++	d := clone.Dialect()
++	if d == nil || d.Name() != core.DialectSQLiteName {
++		t.Fatalf("expected SQLite dialect in UnsafeWithoutHooks clone, got %v", d)
++	}
++}
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index e5e847ee..9872972a 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -10,6 +10,50 @@ const (
+ 	envDatabaseDSN    = "PB_DATABASE_DSN"
+ )
+ 
++// Dialect name constants for the supported data database dialects.
++const (
++	DialectSQLiteName = "sqlite"
++	DialectMySQLName  = "mysql"
++)
++
++// Dialect describes the SQL dialect used by the app's data database.
++//
++// It is intentionally minimal (only exposing Name()) and is meant to be
++// used as a replacement for the scattered isMySQLDataDB conditionals.
++type Dialect interface {
++	Name() string
++}
++
++// SQLiteDialect represents the SQLite data database dialect.
++type SQLiteDialect struct{}
++
++// Name implements the [Dialect] interface.
++func (SQLiteDialect) Name() string {
++	return DialectSQLiteName
++}
++
++// MySQLDialect represents the MySQL data database dialect.
++type MySQLDialect struct{}
++
++// Name implements the [Dialect] interface.
++func (MySQLDialect) Name() string {
++	return DialectMySQLName
++}
++
++// DialectForDriver returns the [Dialect] for the provided driver name.
++//
++// The PB_DATABASE_DRIVER env var takes precedence over the provided
++// driverName, allowing operators to force a dialect independent of the
++// underlying test/app driver (e.g. pointing a SQLite-backed test app at
++// the MySQL code paths).
++func DialectForDriver(driverName string) Dialect {
++	if strings.EqualFold(os.Getenv(envDatabaseDriver), DialectMySQLName) || strings.EqualFold(driverName, DialectMySQLName) {
++		return MySQLDialect{}
++	}
++
++	return SQLiteDialect{}
++}
++
+ func isMySQLDataDB(app App) bool {
+ 	return IsMySQLDataDB(app)
+ }
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index f910c7bd..2dcc3a85 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -23,3 +23,43 @@ func TestEnvForcedMySQLBootstrapWithSQLiteTestApp(t *testing.T) {
+ 
+ 	require.True(t, core.IsMySQLDataDB(app))
+ }
++
++func TestDialectForDriver(t *testing.T) {
++	t.Run("empty driver returns SQLite", func(t *testing.T) {
++		require.Equal(t, core.DialectSQLiteName, core.DialectForDriver("").Name())
++	})
++
++	t.Run("sqlite driver returns SQLite", func(t *testing.T) {
++		require.Equal(t, core.DialectSQLiteName, core.DialectForDriver("sqlite").Name())
++	})
++
++	t.Run("mysql driver returns MySQL", func(t *testing.T) {
++		require.Equal(t, core.DialectMySQLName, core.DialectForDriver("mysql").Name())
++	})
++
++	t.Run("env var overrides driver name", func(t *testing.T) {
++		t.Setenv("PB_DATABASE_DRIVER", "mysql")
++		require.Equal(t, core.DialectMySQLName, core.DialectForDriver("sqlite").Name())
++	})
++
++	t.Run("env var sqlite does not override mysql driver", func(t *testing.T) {
++		t.Setenv("PB_DATABASE_DRIVER", "sqlite")
++		require.Equal(t, core.DialectMySQLName, core.DialectForDriver("mysql").Name())
++	})
++}
++
++func TestEnvForcedMySQLDialectWithSQLiteTestApp(t *testing.T) {
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++
++	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
++		DBConnect: func(dbPath string) (*dbx.DB, error) {
++			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
++			return dbx.Open("sqlite", dbPath+pragmas)
++		},
++	})
++	require.NoError(t, err)
++	defer app.Cleanup()
++
++	require.NotNil(t, app.Dialect())
++	require.Equal(t, core.DialectMySQLName, app.Dialect().Name())
++}
+diff --git a/core/db_tx_test.go b/core/db_tx_test.go
+index d83f1268..91fbe852 100644
+--- a/core/db_tx_test.go
++++ b/core/db_tx_test.go
+@@ -6,6 +6,7 @@ import (
+ 
+ 	"github.com/pocketbase/pocketbase/core"
+ 	"github.com/pocketbase/pocketbase/tests"
++	"github.com/stretchr/testify/require"
+ )
+ 
+ func TestRunInTransaction(t *testing.T) {
+@@ -411,3 +412,36 @@ func TestTransactionFromInnerDeleteHook(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestTransactionInheritsParentDataDialect(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	parentDialect := app.Dialect()
++	require.NotNil(t, parentDialect)
++
++	err := app.RunInTransaction(func(txApp core.App) error {
++		d := txApp.Dialect()
++		require.NotNil(t, d)
++		require.Equal(t, parentDialect.Name(), d.Name())
++		return nil
++	})
++	require.NoError(t, err)
++}
++
++func TestAuxTransactionPreservesParentDataDialect(t *testing.T) {
++	app, _ := tests.NewTestApp()
++	defer app.Cleanup()
++
++	parentDialect := app.Dialect()
++	require.NotNil(t, parentDialect)
++
++	err := app.AuxRunInTransaction(func(txApp core.App) error {
++		// aux transaction should still expose the parent's data dialect
++		d := txApp.Dialect()
++		require.NotNil(t, d)
++		require.Equal(t, parentDialect.Name(), d.Name())
++		return nil
++	})
++	require.NoError(t, err)
++}
+-- 
+2.54.0.windows.1
+

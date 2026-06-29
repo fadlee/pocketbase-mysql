@@ -1,0 +1,28 @@
+From d7417a8ef5d3caca5179f61c85d4bb36e12a7667 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:57:26 +0700
+Subject: [PATCH 78/91] fix: quote sql alias in MySQL ViewsQuery to avoid
+ reserved keyword error
+
+---
+ core/db_dialect.go | 4 +---
+ 1 file changed, 1 insertion(+), 3 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 55039c90..33341d39 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -275,9 +275,7 @@ func (MySQLDialect) HasTableQuery() string {
+ 
+ // ViewsQuery implements the [introspectionDialect] interface.
+ func (MySQLDialect) ViewsQuery() string {
+-	return `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
+-			FROM information_schema.VIEWS
+-			WHERE TABLE_SCHEMA = DATABASE()`
++	return "SELECT TABLE_NAME AS name, VIEW_DEFINITION AS `sql` FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE()"
+ }
+ 
+ // IndexOwnerQuery implements the [introspectionDialect] interface.
+-- 
+2.54.0.windows.1
+

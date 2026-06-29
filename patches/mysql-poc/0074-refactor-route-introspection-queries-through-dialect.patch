@@ -1,0 +1,435 @@
+From b67203755b1ef32ddd842fe4634fa2be9aa717e7 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:15:16 +0700
+Subject: [PATCH 74/91] refactor: route introspection queries through dialect
+
+---
+ core/collection_record_table_sync.go |  33 ++-------
+ core/collection_validate.go          |  22 +-----
+ core/db_dialect.go                   | 104 +++++++++++++++++++++++++++
+ core/db_dialect_test.go              |  55 ++++++++++++++
+ core/db_table.go                     |  88 +++--------------------
+ 5 files changed, 177 insertions(+), 125 deletions(-)
+
+diff --git a/core/collection_record_table_sync.go b/core/collection_record_table_sync.go
+index aa6c8b15..400692c3 100644
+--- a/core/collection_record_table_sync.go
++++ b/core/collection_record_table_sync.go
+@@ -26,7 +26,7 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 	txErr := app.RunInTransaction(func(txApp App) error {
+ 		// create
+ 		// -----------------------------------------------------------
+-		if oldCollection == nil || !recordTableExistsForSchemaSync(app, txApp, oldCollection.Name) {
++		if oldCollection == nil || !recordTableExistsForSchemaSync(txApp, oldCollection.Name) {
+ 			tableName := newCollection.Name
+ 
+ 			fields := newCollection.Fields
+@@ -177,20 +177,11 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
+ 	return nil
+ }
+ 
+-func recordTableExistsForSchemaSync(app App, txApp App, tableName string) bool {
+-	if !isMySQLDataDB(txApp) {
+-		return app.HasTable(tableName)
+-	}
+-
++func recordTableExistsForSchemaSync(txApp App, tableName string) bool {
+ 	var exists int
+-	err := txApp.DB().NewQuery(`
+-		SELECT 1
+-		FROM information_schema.TABLES
+-		WHERE TABLE_SCHEMA = DATABASE()
+-			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+-			AND LOWER(TABLE_NAME) = LOWER({:tableName})
+-		LIMIT 1
+-	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
++	err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).HasTableQuery()).
++		Bind(dbx.Params{"tableName": tableName}).
++		Row(&exists)
+ 
+ 	return err == nil && exists > 0
+ }
+@@ -232,19 +223,7 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
+ 				Name string `db:"name"`
+ 				SQL  string `db:"sql"`
+ 			}{}
+-			var err error
+-			if isMySQLDataDB(txApp) {
+-				err = txApp.DB().Select("TABLE_NAME AS name", "VIEW_DEFINITION AS sql").
+-					From("information_schema.VIEWS").
+-					AndWhere(dbx.NewExp("TABLE_SCHEMA = DATABASE()")).
+-					All(&views)
+-			} else {
+-				err = txApp.DB().Select("name", "sql").
+-					From("sqlite_master").
+-					AndWhere(dbx.NewExp("sql is not null")).
+-					AndWhere(dbx.HashExp{"type": "view"}).
+-					All(&views)
+-			}
++			err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).ViewsQuery()).All(&views)
+ 			if err != nil {
+ 				return err
+ 			}
+diff --git a/core/collection_validate.go b/core/collection_validate.go
+index 34b08cdc..681f96c9 100644
+--- a/core/collection_validate.go
++++ b/core/collection_validate.go
+@@ -562,30 +562,12 @@ func (cv *collectionValidator) checkIndexes(value any) error {
+ 
+ 		// ensure that the index name is not used in another collection
+ 		var usedTblName string
+-		if isMySQLDataDB(cv.app) {
+-			_ = cv.app.ConcurrentDB().NewQuery(`
+-				SELECT TABLE_NAME
+-				FROM information_schema.STATISTICS
+-				WHERE TABLE_SCHEMA = DATABASE()
+-					AND LOWER(TABLE_NAME) != LOWER({:oldName})
+-					AND LOWER(TABLE_NAME) != LOWER({:newName})
+-					AND LOWER(INDEX_NAME) = LOWER({:indexName})
+-				LIMIT 1
+-			`).Bind(dbx.Params{
++		_ = cv.app.ConcurrentDB().NewQuery(cv.app.Dialect().(introspectionDialect).IndexOwnerQuery()).
++			Bind(dbx.Params{
+ 				"oldName":   cv.original.Name,
+ 				"newName":   cv.new.Name,
+ 				"indexName": parsed.IndexName,
+ 			}).Row(&usedTblName)
+-		} else {
+-			_ = cv.app.ConcurrentDB().Select("tbl_name").
+-				From("sqlite_master").
+-				AndWhere(dbx.HashExp{"type": "index"}).
+-				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:oldName})", dbx.Params{"oldName": cv.original.Name})).
+-				AndWhere(dbx.NewExp("LOWER([[tbl_name]])!=LOWER({:newName})", dbx.Params{"newName": cv.new.Name})).
+-				AndWhere(dbx.NewExp("LOWER([[name]])=LOWER({:indexName})", dbx.Params{"indexName": parsed.IndexName})).
+-				Limit(1).
+-				Row(&usedTblName)
+-		}
+ 		if usedTblName != "" {
+ 			return validation.Errors{
+ 				strconv.Itoa(i): validation.NewError(
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index bcefe6dd..b6161f80 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -39,6 +39,22 @@ type columnDialect interface {
+ 	JSONValueColumnType(defaultValue string) string
+ }
+ 
++// introspectionDialect is a local (unexported) capability interface that
++// exposes dialect-specific SQL queries for table metadata introspection
++// (columns, indexes, table existence, views, etc.).
++//
++// It is intentionally kept separate from the exported [Dialect] interface so
++// that the public surface stays minimal while the concrete dialect types can
++// still be type-asserted to provide introspection SQL.
++type introspectionDialect interface {
++	TableColumnsQuery() string
++	TableInfoQuery() string
++	TableIndexesQuery() string
++	HasTableQuery() string
++	ViewsQuery() string
++	IndexOwnerQuery() string
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -77,6 +93,36 @@ func (SQLiteDialect) JSONValueColumnType(defaultValue string) string {
+ 	return fmt.Sprintf("JSON DEFAULT '%s' NOT NULL", defaultValue)
+ }
+ 
++// TableColumnsQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) TableColumnsQuery() string {
++	return "SELECT name FROM PRAGMA_TABLE_INFO({:tableName})"
++}
++
++// TableInfoQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) TableInfoQuery() string {
++	return "SELECT * FROM PRAGMA_TABLE_INFO({:tableName})"
++}
++
++// TableIndexesQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) TableIndexesQuery() string {
++	return "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'index' AND tbl_name = {:tableName}"
++}
++
++// HasTableQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) HasTableQuery() string {
++	return "SELECT (1) FROM sqlite_schema WHERE type IN ('table', 'view') AND LOWER(name) = LOWER({:tableName}) LIMIT 1"
++}
++
++// ViewsQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) ViewsQuery() string {
++	return "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'view'"
++}
++
++// IndexOwnerQuery implements the [introspectionDialect] interface.
++func (SQLiteDialect) IndexOwnerQuery() string {
++	return "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND LOWER(tbl_name) != LOWER({:oldName}) AND LOWER(tbl_name) != LOWER({:newName}) AND LOWER(name) = LOWER({:indexName}) LIMIT 1"
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -116,6 +162,64 @@ func (MySQLDialect) JSONValueColumnType(defaultValue string) string {
+ 	return "JSON NOT NULL"
+ }
+ 
++// TableColumnsQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) TableColumnsQuery() string {
++	return `SELECT COLUMN_NAME
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION`
++}
++
++// TableInfoQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) TableInfoQuery() string {
++	return `SELECT
++				ORDINAL_POSITION - 1 AS cid,
++				COLUMN_NAME AS name,
++				COLUMN_TYPE AS type,
++				CASE WHEN IS_NULLABLE = 'NO' THEN 1 ELSE 0 END AS notnull,
++				COLUMN_DEFAULT AS dflt_value,
++				CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END AS pk
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION`
++}
++
++// TableIndexesQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) TableIndexesQuery() string {
++	return `SELECT INDEX_NAME AS name, CONCAT('INDEX ', INDEX_NAME) AS sql
++			FROM information_schema.STATISTICS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName} AND INDEX_NAME != 'PRIMARY'
++			GROUP BY INDEX_NAME`
++}
++
++// HasTableQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) HasTableQuery() string {
++	return `SELECT 1
++			FROM information_schema.TABLES
++			WHERE TABLE_SCHEMA = DATABASE()
++				AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
++				AND LOWER(TABLE_NAME) = LOWER({:tableName})
++			LIMIT 1`
++}
++
++// ViewsQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) ViewsQuery() string {
++	return `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
++			FROM information_schema.VIEWS
++			WHERE TABLE_SCHEMA = DATABASE()`
++}
++
++// IndexOwnerQuery implements the [introspectionDialect] interface.
++func (MySQLDialect) IndexOwnerQuery() string {
++	return `SELECT TABLE_NAME
++			FROM information_schema.STATISTICS
++			WHERE TABLE_SCHEMA = DATABASE()
++				AND LOWER(TABLE_NAME) != LOWER({:oldName})
++				AND LOWER(TABLE_NAME) != LOWER({:newName})
++				AND LOWER(INDEX_NAME) = LOWER({:indexName})
++			LIMIT 1`
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index 2dcc3a85..8b070384 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -63,3 +63,58 @@ func TestEnvForcedMySQLDialectWithSQLiteTestApp(t *testing.T) {
+ 	require.NotNil(t, app.Dialect())
+ 	require.Equal(t, core.DialectMySQLName, app.Dialect().Name())
+ }
++
++func TestIntrospectionDialectSQLite(t *testing.T) {
++	d := core.SQLiteDialect{}
++
++	require.Equal(t, "SELECT name FROM PRAGMA_TABLE_INFO({:tableName})", d.TableColumnsQuery())
++	require.Equal(t, "SELECT * FROM PRAGMA_TABLE_INFO({:tableName})", d.TableInfoQuery())
++	require.Equal(t, "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'index' AND tbl_name = {:tableName}", d.TableIndexesQuery())
++	require.Equal(t, "SELECT (1) FROM sqlite_schema WHERE type IN ('table', 'view') AND LOWER(name) = LOWER({:tableName}) LIMIT 1", d.HasTableQuery())
++	require.Equal(t, "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'view'", d.ViewsQuery())
++	require.Equal(t, "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND LOWER(tbl_name) != LOWER({:oldName}) AND LOWER(tbl_name) != LOWER({:newName}) AND LOWER(name) = LOWER({:indexName}) LIMIT 1", d.IndexOwnerQuery())
++}
++
++func TestIntrospectionDialectMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	require.Equal(t, `SELECT COLUMN_NAME
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION`, d.TableColumnsQuery())
++
++	require.Equal(t, `SELECT
++				ORDINAL_POSITION - 1 AS cid,
++				COLUMN_NAME AS name,
++				COLUMN_TYPE AS type,
++				CASE WHEN IS_NULLABLE = 'NO' THEN 1 ELSE 0 END AS notnull,
++				COLUMN_DEFAULT AS dflt_value,
++				CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END AS pk
++			FROM information_schema.COLUMNS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
++			ORDER BY ORDINAL_POSITION`, d.TableInfoQuery())
++
++	require.Equal(t, `SELECT INDEX_NAME AS name, CONCAT('INDEX ', INDEX_NAME) AS sql
++			FROM information_schema.STATISTICS
++			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName} AND INDEX_NAME != 'PRIMARY'
++			GROUP BY INDEX_NAME`, d.TableIndexesQuery())
++
++	require.Equal(t, `SELECT 1
++			FROM information_schema.TABLES
++			WHERE TABLE_SCHEMA = DATABASE()
++				AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
++				AND LOWER(TABLE_NAME) = LOWER({:tableName})
++			LIMIT 1`, d.HasTableQuery())
++
++	require.Equal(t, `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
++			FROM information_schema.VIEWS
++			WHERE TABLE_SCHEMA = DATABASE()`, d.ViewsQuery())
++
++	require.Equal(t, `SELECT TABLE_NAME
++			FROM information_schema.STATISTICS
++			WHERE TABLE_SCHEMA = DATABASE()
++				AND LOWER(TABLE_NAME) != LOWER({:oldName})
++				AND LOWER(TABLE_NAME) != LOWER({:newName})
++				AND LOWER(INDEX_NAME) = LOWER({:indexName})
++			LIMIT 1`, d.IndexOwnerQuery())
++}
+diff --git a/core/db_table.go b/core/db_table.go
+index 4aa9634d..c1b203b3 100644
+--- a/core/db_table.go
++++ b/core/db_table.go
+@@ -10,18 +10,8 @@ import (
+ // TableColumns returns all column names of a single table by its name.
+ func (app *BaseApp) TableColumns(tableName string) ([]string, error) {
+ 	columns := []string{}
+-	if isMySQLDataDB(app) {
+-		err := app.ConcurrentDB().NewQuery(`
+-			SELECT COLUMN_NAME
+-			FROM information_schema.COLUMNS
+-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
+-			ORDER BY ORDINAL_POSITION
+-		`).Bind(dbx.Params{"tableName": tableName}).Column(&columns)
+-
+-		return columns, err
+-	}
+ 
+-	err := app.ConcurrentDB().NewQuery("SELECT name FROM PRAGMA_TABLE_INFO({:tableName})").
++	err := app.ConcurrentDB().NewQuery(app.Dialect().(introspectionDialect).TableColumnsQuery()).
+ 		Bind(dbx.Params{"tableName": tableName}).
+ 		Column(&columns)
+ 
+@@ -43,30 +33,8 @@ type TableInfoRow struct {
+ // TableInfo returns the "table_info" pragma result for the specified table.
+ func (app *BaseApp) TableInfo(tableName string) ([]*TableInfoRow, error) {
+ 	info := []*TableInfoRow{}
+-	if isMySQLDataDB(app) {
+-		err := app.ConcurrentDB().NewQuery(`
+-			SELECT
+-				ORDINAL_POSITION - 1 AS cid,
+-				COLUMN_NAME AS name,
+-				COLUMN_TYPE AS type,
+-				CASE WHEN IS_NULLABLE = 'NO' THEN 1 ELSE 0 END AS notnull,
+-				COLUMN_DEFAULT AS dflt_value,
+-				CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END AS pk
+-			FROM information_schema.COLUMNS
+-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
+-			ORDER BY ORDINAL_POSITION
+-		`).Bind(dbx.Params{"tableName": tableName}).All(&info)
+-		if err != nil {
+-			return nil, err
+-		}
+-		if len(info) == 0 {
+-			return nil, fmt.Errorf("empty table info probably due to invalid or missing table %s", tableName)
+-		}
+-
+-		return info, nil
+-	}
+ 
+-	err := app.ConcurrentDB().NewQuery("SELECT * FROM PRAGMA_TABLE_INFO({:tableName})").
++	err := app.ConcurrentDB().NewQuery(app.Dialect().(introspectionDialect).TableInfoQuery()).
+ 		Bind(dbx.Params{"tableName": tableName}).
+ 		All(&info)
+ 	if err != nil {
+@@ -90,32 +58,9 @@ func (app *BaseApp) TableIndexes(tableName string) (map[string]string, error) {
+ 		Name string
+ 		Sql  string
+ 	}{}
+-	if isMySQLDataDB(app) {
+-		err := app.ConcurrentDB().NewQuery(`
+-			SELECT INDEX_NAME AS name, CONCAT('INDEX ', INDEX_NAME) AS sql
+-			FROM information_schema.STATISTICS
+-			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName} AND INDEX_NAME != 'PRIMARY'
+-			GROUP BY INDEX_NAME
+-		`).Bind(dbx.Params{"tableName": tableName}).All(&indexes)
+-		if err != nil {
+-			return nil, err
+-		}
+-
+-		result := make(map[string]string, len(indexes))
+-		for _, idx := range indexes {
+-			result[idx.Name] = idx.Sql
+-		}
+-
+-		return result, nil
+-	}
+ 
+-	err := app.ConcurrentDB().Select("name", "sql").
+-		From("sqlite_master").
+-		AndWhere(dbx.NewExp("sql is not null")).
+-		AndWhere(dbx.HashExp{
+-			"type":     "index",
+-			"tbl_name": tableName,
+-		}).
++	err := app.ConcurrentDB().NewQuery(app.Dialect().(introspectionDialect).TableIndexesQuery()).
++		Bind(dbx.Params{"tableName": tableName}).
+ 		All(&indexes)
+ 	if err != nil {
+ 		return nil, err
+@@ -148,11 +93,13 @@ func (app *BaseApp) DeleteTable(dangerousTableName string) error {
+ // HasTable checks if a table (or view) with the provided name exists (case insensitive).
+ // in the data.db.
+ func (app *BaseApp) HasTable(tableName string) bool {
+-	if isMySQLDataDB(app) {
+-		return app.mysqlHasTable(tableName)
+-	}
++	var exists int
++
++	err := app.ConcurrentDB().NewQuery(app.Dialect().(introspectionDialect).HasTableQuery()).
++		Bind(dbx.Params{"tableName": tableName}).
++		Row(&exists)
+ 
+-	return app.hasTable(app.ConcurrentDB(), tableName)
++	return err == nil && exists > 0
+ }
+ 
+ // AuxHasTable checks if a table (or view) with the provided name exists (case insensitive)
+@@ -174,21 +121,6 @@ func (app *BaseApp) hasTable(db dbx.Builder, tableName string) bool {
+ 	return err == nil && exists > 0
+ }
+ 
+-func (app *BaseApp) mysqlHasTable(tableName string) bool {
+-	var exists int
+-
+-	err := app.ConcurrentDB().NewQuery(`
+-		SELECT 1
+-		FROM information_schema.TABLES
+-		WHERE TABLE_SCHEMA = DATABASE()
+-			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+-			AND LOWER(TABLE_NAME) = LOWER({:tableName})
+-		LIMIT 1
+-	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
+-
+-	return err == nil && exists > 0
+-}
+-
+ // Vacuum executes VACUUM on the data.db in order to reclaim unused data db disk space.
+ func (app *BaseApp) Vacuum() error {
+ 	return app.vacuum(app.NonconcurrentDB())
+-- 
+2.54.0.windows.1
+

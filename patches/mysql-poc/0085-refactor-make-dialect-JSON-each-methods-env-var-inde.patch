@@ -1,0 +1,142 @@
+From 0fa909d3b2d4b2ece6f60da841422ef501cfcc3d Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 13:16:11 +0700
+Subject: [PATCH 85/91] refactor: make dialect JSON each methods env-var
+ independent
+
+---
+ core/db_dialect.go         | 20 ++++++++++++++++++--
+ core/db_dialect_test.go    | 28 ++++++++++++++++++++++++++++
+ tools/dbutils/json.go      |  7 +++++++
+ tools/dbutils/json_test.go | 21 +++++++++++++++++++++
+ 4 files changed, 74 insertions(+), 2 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 06d4a120..fca8fc95 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -261,8 +261,17 @@ func (SQLiteDialect) CountOverrideColumn(isView bool) (string, bool) {
+ }
+ 
+ // JSONEachColumnExpr implements the [jsonEachDialect] interface.
++//
++// Returns the SQLite json_each expression directly rather than delegating
++// to dbutils.JSONEach, so the result is always SQLite regardless of
++// PB_DATABASE_DRIVER env var.
+ func (SQLiteDialect) JSONEachColumnExpr(column string) string {
+-	return dbutils.JSONEach(column)
++	// note: we are not using the new and shorter "if(x,y)" syntax for
++	// compatibility with custom drivers that use older SQLite version
++	return fmt.Sprintf(
++		`json_each(CASE WHEN iif(json_valid([[%s]]), json_type([[%s]])='array', FALSE) THEN [[%s]] ELSE json_array([[%s]]) END)`,
++		column, column, column, column,
++	)
+ }
+ 
+ // JSONEachParamExpr implements the [jsonEachDialect] interface.
+@@ -425,8 +434,15 @@ func (MySQLDialect) CountOverrideColumn(isView bool) (string, bool) {
+ }
+ 
+ // JSONEachColumnExpr implements the [jsonEachDialect] interface.
++//
++// Returns the MySQL JSON_TABLE expression directly rather than delegating
++// to dbutils.JSONEach, so the result is always MySQL regardless of
++// PB_DATABASE_DRIVER env var.
+ func (MySQLDialect) JSONEachColumnExpr(column string) string {
+-	return dbutils.JSONEach(column)
++	return fmt.Sprintf(
++		`JSON_TABLE(CASE WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY' THEN [[%s]] ELSE JSON_ARRAY([[%s]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
++		column, column, column, column,
++	)
+ }
+ 
+ // JSONEachParamExpr implements the [jsonEachDialect] interface.
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index c89bceaf..dabc1f13 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -150,3 +150,31 @@ func TestCountOverrideColumnMySQL(t *testing.T) {
+ 		require.Equal(t, "", col)
+ 	})
+ }
++
++func TestJSONEachColumnExprSQLite(t *testing.T) {
++	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
++
++	// Test with PB_DATABASE_DRIVER unset/empty — should return SQLite expression
++	t.Setenv("PB_DATABASE_DRIVER", "")
++	result := core.SQLiteDialect{}.JSONEachColumnExpr("a.b")
++	require.Equal(t, expected, result)
++
++	// Test with PB_DATABASE_DRIVER=mysql — should still return SQLite expression
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++	result = core.SQLiteDialect{}.JSONEachColumnExpr("a.b")
++	require.Equal(t, expected, result, "SQLiteDialect must return SQLite expression regardless of env var")
++}
++
++func TestJSONEachColumnExprMySQL(t *testing.T) {
++	expected := "JSON_TABLE(CASE WHEN JSON_VALID([[a.b]]) AND JSON_TYPE([[a.b]]) = 'ARRAY' THEN [[a.b]] ELSE JSON_ARRAY([[a.b]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))"
++
++	// Test with PB_DATABASE_DRIVER unset/empty — should return MySQL expression
++	t.Setenv("PB_DATABASE_DRIVER", "")
++	result := core.MySQLDialect{}.JSONEachColumnExpr("a.b")
++	require.Equal(t, expected, result)
++
++	// Test with PB_DATABASE_DRIVER=mysql — should still return MySQL expression
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++	result = core.MySQLDialect{}.JSONEachColumnExpr("a.b")
++	require.Equal(t, expected, result, "MySQLDialect must return MySQL expression regardless of env var")
++}
+diff --git a/tools/dbutils/json.go b/tools/dbutils/json.go
+index 88c917cb..9f0d5571 100644
+--- a/tools/dbutils/json.go
++++ b/tools/dbutils/json.go
+@@ -8,6 +8,13 @@ import (
+ 
+ // JSONEach returns JSON_EACH SQLite string expression with
+ // some normalizations for non-json columns.
++//
++// Transitional: this helper still checks PB_DATABASE_DRIVER for unmigrated
++// call sites in core/view.go, core/record_query_expand.go, and
++// core/record_model.go. The dialect methods (SQLiteDialect.JSONEachColumnExpr,
++// MySQLDialect.JSONEachColumnExpr) do NOT use this helper and are
++// env-var-independent. The env var check will be removed in Task 11.1
++// once all call sites are migrated to use the dialect.
+ func JSONEach(column string) string {
+ 	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+ 		return fmt.Sprintf(
+diff --git a/tools/dbutils/json_test.go b/tools/dbutils/json_test.go
+index 194b9a6c..49deb089 100644
+--- a/tools/dbutils/json_test.go
++++ b/tools/dbutils/json_test.go
+@@ -16,6 +16,27 @@ func TestJSONEach(t *testing.T) {
+ 	}
+ }
+ 
++func TestJSONEachEnvVarTransitional(t *testing.T) {
++	// Transitional: JSONEach still checks PB_DATABASE_DRIVER for unmigrated
++	// call sites. This test documents that behavior.
++
++	// SQLite (default)
++	t.Setenv("PB_DATABASE_DRIVER", "")
++	result := dbutils.JSONEach("a.b")
++	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
++	if result != expected {
++		t.Fatalf("Expected SQLite expression\n%v\ngot\n%v", expected, result)
++	}
++
++	// MySQL
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++	result = dbutils.JSONEach("a.b")
++	expected = "JSON_TABLE(CASE WHEN JSON_VALID([[a.b]]) AND JSON_TYPE([[a.b]]) = 'ARRAY' THEN [[a.b]] ELSE JSON_ARRAY([[a.b]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))"
++	if result != expected {
++		t.Fatalf("Expected MySQL expression\n%v\ngot\n%v", expected, result)
++	}
++}
++
+ func TestJSONArrayLength(t *testing.T) {
+ 	result := dbutils.JSONArrayLength("a.b")
+ 
+-- 
+2.54.0.windows.1
+

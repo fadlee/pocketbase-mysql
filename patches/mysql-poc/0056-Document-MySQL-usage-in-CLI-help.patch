@@ -1,7 +1,7 @@
 From 22fc8038fec998bf35793b7290e80abbb2ae3236 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 14:26:34 +0700
-Subject: [PATCH 56/60] Document MySQL usage in CLI help
+Subject: [PATCH 56/91] Document MySQL usage in CLI help
 
 ---
  cmd/serve.go  | 42 +++++++++++++++++++++++++++++++++++++++---

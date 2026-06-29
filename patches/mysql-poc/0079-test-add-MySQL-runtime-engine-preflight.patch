@@ -1,0 +1,109 @@
+From bf68a5dbc9729d98f7a15c172daaaeba5d1ce49e Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:57:29 +0700
+Subject: [PATCH 79/91] test: add MySQL runtime engine preflight
+
+---
+ scripts/mysql-runtime-qa.mjs | 79 ++++++++++++++++++++++++++++++++++++
+ 1 file changed, 79 insertions(+)
+
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index 5c7934a7..8c94bcf4 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -356,6 +356,84 @@ class QA {
+     });
+   }
+ 
++  // Query the MySQL version string and reject unsupported engines (MariaDB)
++  // or MySQL versions older than 8.x. JSON_TABLE — used by the dialect
++  // refactor — requires MySQL 8.0.17+.
++  //
++  // In Docker mode the mysql CLI runs inside the container via `docker exec`.
++  // In skip-Docker mode the local mysql CLI is used; if it is not installed
++  // the preflight is skipped with a warning (the TCP connectivity check already
++  // passed).
++  preflightMysqlVersion() {
++    this.logStep("Checking MySQL engine and version...");
++
++    let cmd, args;
++    if (this.opts.skipDocker) {
++      // Check if the mysql CLI is available on the host.
++      const probe = process.platform === "win32"
++        ? spawnSync("where", ["mysql"], { stdio: "ignore" })
++        : spawnSync("which", ["mysql"], { stdio: "ignore" });
++      if (probe.status !== 0) {
++        this.logStep("WARNING: mysql CLI not found on host — skipping engine/version preflight.");
++        return;
++      }
++      cmd = "mysql";
++      args = [
++        "-h", this.opts.mysqlHost, "-P", String(this.opts.mysqlPort),
++        "-u", this.opts.mysqlUser, ...this.mysqlPwFlag(),
++        this.opts.mysqlDatabase, "-N", "-B", "-e", "SELECT VERSION()",
++      ];
++    } else {
++      cmd = "docker";
++      args = [
++        "exec", this.opts.mysqlContainer,
++        "mysql", "-h127.0.0.1", "-uroot", ...this.mysqlPwFlag(),
++        this.opts.mysqlDatabase, "-N", "-B", "-e", "SELECT VERSION()",
++      ];
++    }
++
++    const r = spawnSync(cmd, args, { stdio: "pipe" });
++    if (r.status !== 0) {
++      const stderr = r.stderr?.toString().trim();
++      throw new Error(`Failed to query MySQL version: ${stderr || "unknown error"}`);
++    }
++    const versionStr = r.stdout?.toString().trim();
++    if (!versionStr) {
++      throw new Error("MySQL version query returned an empty result");
++    }
++
++    // MariaDB reports version strings like "10.11.8-MariaDB" or
++    // "11.4.3-MariaDB-1:11.4.3+maria~ubu2204". MySQL reports "8.0.40" or
++    // "8.4.3" (no suffix). Some MySQL forks embed a suffix like "-MySQL".
++    const isMariaDB = /mariadb/i.test(versionStr);
++    if (isMariaDB) {
++      throw new Error(
++        `Unsupported MySQL engine: MariaDB detected ("${versionStr}").\n` +
++        `The PocketBase MySQL fork requires MySQL 8.0.17+ (JSON_TABLE support).\n` +
++        `MariaDB is not supported due to differences in JSON functions and SQL syntax.`
++      );
++    }
++
++    // Extract the major.minor version number from the leading numeric part.
++    const match = versionStr.match(/^(\d+)\.(\d+)/);
++    if (!match) {
++      throw new Error(`Could not parse MySQL version from "${versionStr}"`);
++    }
++    const major = parseInt(match[1], 10);
++
++    // Require MySQL 8.0.17+ for JSON_TABLE. We check major >= 8, and for
++    // major === 8 we accept any minor (8.0.x and 8.4.x both have JSON_TABLE).
++    if (major < 8) {
++      throw new Error(
++        `Unsupported MySQL version: ${versionStr}.\n` +
++        `The PocketBase MySQL fork requires MySQL 8.0.17+ (JSON_TABLE support).\n` +
++        `Please upgrade your MySQL server.`
++      );
++    }
++
++    this.logStep(`MySQL engine/version OK: ${versionStr}`);
++  }
++
+   maybeStartDocker() {
+     if (this.opts.skipDocker) {
+       this.logStep(`Skipping Docker - using existing MySQL at ${this.opts.mysqlHost}:${this.opts.mysqlPort}`);
+@@ -1220,6 +1298,7 @@ class QA {
+     await this.ensurePortFree();
+     this.maybeStartDocker();
+     await this.ensureMysqlReachable();
++    this.preflightMysqlVersion();
+     this.buildBinary();
+     await this.startServer();
+     await this.createSuperuserAndAuth();
+-- 
+2.54.0.windows.1
+

@@ -1,7 +1,7 @@
 From fce2d9b32b53e2f36a6fa46d87befd00ce560d7d Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 14:26:36 +0700
-Subject: [PATCH 57/60] Refresh patch stack after CLI help update
+Subject: [PATCH 57/91] Refresh patch stack after CLI help update
 
 ---
  ...-document-initial-MySQL-gap-analysis.patch |     2 +-

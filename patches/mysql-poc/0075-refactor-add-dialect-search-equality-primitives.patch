@@ -1,0 +1,901 @@
+From af24bf845b4cb2a64ea173b17c22cf4803ff6ea7 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:28:45 +0700
+Subject: [PATCH 75/91] refactor: add dialect search equality primitives
+
+---
+ core/db_dialect.go                 |  75 +++++
+ core/record_field_resolver.go      |  38 ++-
+ tools/search/dialect_primitives.go |  17 ++
+ tools/search/filter.go             | 134 +++++----
+ tools/search/filter_test.go        | 443 +++++++++++++++++++++++++++++
+ 5 files changed, 657 insertions(+), 50 deletions(-)
+ create mode 100644 tools/search/dialect_primitives.go
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index b6161f80..a2dc5d93 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -4,6 +4,8 @@ import (
+ 	"fmt"
+ 	"os"
+ 	"strings"
++
++	"github.com/pocketbase/pocketbase/tools/search"
+ )
+ 
+ const (
+@@ -55,6 +57,19 @@ type introspectionDialect interface {
+ 	IndexOwnerQuery() string
+ }
+ 
++// equalityDialect is a local (unexported) capability interface that exposes
++// dialect-specific SQL primitives for equality (=, !=) and LIKE expression
++// building used by the search filter package.
++//
++// It is intentionally kept separate from the exported [Dialect] interface so
++// that the public surface stays minimal while the concrete dialect types can
++// still be type-asserted to provide search primitives.
++type equalityDialect interface {
++	EqualityOperators() search.EqualityOperators
++	LikeEscapeClause() string
++	LikeColumnContainsExpr(column string) string
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -123,6 +138,34 @@ func (SQLiteDialect) IndexOwnerQuery() string {
+ 	return "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND LOWER(tbl_name) != LOWER({:oldName}) AND LOWER(tbl_name) != LOWER({:newName}) AND LOWER(name) = LOWER({:indexName}) LIMIT 1"
+ }
+ 
++// EqualityOperators implements the [equalityDialect] interface.
++func (SQLiteDialect) EqualityOperators() search.EqualityOperators {
++	return search.EqualityOperators{
++		Equal: search.EqualityOperatorSet{
++			EqualOp:     "=",
++			NullEqualOp: "IS",
++			NullConcat:  "OR",
++			NullExpr:    "IS NULL",
++		},
++		NotEqual: search.EqualityOperatorSet{
++			EqualOp:     "IS NOT",
++			NullEqualOp: "IS NOT",
++			NullConcat:  "AND",
++			NullExpr:    "IS NOT NULL",
++		},
++	}
++}
++
++// LikeEscapeClause implements the [equalityDialect] interface.
++func (SQLiteDialect) LikeEscapeClause() string {
++	return " ESCAPE '\\'"
++}
++
++// LikeColumnContainsExpr implements the [equalityDialect] interface.
++func (SQLiteDialect) LikeColumnContainsExpr(column string) string {
++	return fmt.Sprintf("'%%' || %s || '%%'", column)
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -220,6 +263,38 @@ func (MySQLDialect) IndexOwnerQuery() string {
+ 			LIMIT 1`
+ }
+ 
++// EqualityOperators implements the [equalityDialect] interface.
++//
++// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
++// `IS NOT TRUE`, etc.), so `<>` is used for value comparisons while keeping
++// `IS NOT NULL` for the null check which works in both drivers.
++func (MySQLDialect) EqualityOperators() search.EqualityOperators {
++	return search.EqualityOperators{
++		Equal: search.EqualityOperatorSet{
++			EqualOp:     "=",
++			NullEqualOp: "IS",
++			NullConcat:  "OR",
++			NullExpr:    "IS NULL",
++		},
++		NotEqual: search.EqualityOperatorSet{
++			EqualOp:     "<>",
++			NullEqualOp: "<>",
++			NullConcat:  "AND",
++			NullExpr:    "IS NOT NULL",
++		},
++	}
++}
++
++// LikeEscapeClause implements the [equalityDialect] interface.
++func (MySQLDialect) LikeEscapeClause() string {
++	return " ESCAPE '\\\\'"
++}
++
++// LikeColumnContainsExpr implements the [equalityDialect] interface.
++func (MySQLDialect) LikeColumnContainsExpr(column string) string {
++	return fmt.Sprintf("CONCAT('%%', %s, '%%')", column)
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index dd5bbbc1..be5aba94 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -82,13 +82,47 @@ func (r *RecordFieldResolver) SetAllowHiddenFields(allowHiddenFields bool) {
+ }
+ 
+ func (r *RecordFieldResolver) LikeEscapeClause() string {
+-	if isMySQLDataDB(r.app) {
+-		return " ESCAPE '\\\\'"
++	if d, ok := r.app.Dialect().(equalityDialect); ok {
++		return d.LikeEscapeClause()
+ 	}
+ 
+ 	return " ESCAPE '\\'"
+ }
+ 
++// EqualityOperators implements the dialect primitive resolver capability
++// by delegating to the app's dialect.
++func (r *RecordFieldResolver) EqualityOperators() search.EqualityOperators {
++	if d, ok := r.app.Dialect().(equalityDialect); ok {
++		return d.EqualityOperators()
++	}
++
++	// SQLite defaults
++	return search.EqualityOperators{
++		Equal: search.EqualityOperatorSet{
++			EqualOp:     "=",
++			NullEqualOp: "IS",
++			NullConcat:  "OR",
++			NullExpr:    "IS NULL",
++		},
++		NotEqual: search.EqualityOperatorSet{
++			EqualOp:     "IS NOT",
++			NullEqualOp: "IS NOT",
++			NullConcat:  "AND",
++			NullExpr:    "IS NOT NULL",
++		},
++	}
++}
++
++// LikeColumnContainsExpr implements the dialect primitive resolver
++// capability by delegating to the app's dialect.
++func (r *RecordFieldResolver) LikeColumnContainsExpr(column string) string {
++	if d, ok := r.app.Dialect().(equalityDialect); ok {
++		return d.LikeColumnContainsExpr(column)
++	}
++
++	return fmt.Sprintf("'%%' || %s || '%%'", column)
++}
++
+ // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
+ func NewRecordFieldResolver(
+ 	app App,
+diff --git a/tools/search/dialect_primitives.go b/tools/search/dialect_primitives.go
+new file mode 100644
+index 00000000..72ac0249
+--- /dev/null
++++ b/tools/search/dialect_primitives.go
+@@ -0,0 +1,17 @@
++package search
++
++// EqualityOperatorSet groups the SQL operator strings used when building
++// equality (=) or inequality (!=) expressions for a specific dialect.
++type EqualityOperatorSet struct {
++	EqualOp     string
++	NullEqualOp string
++	NullConcat  string
++	NullExpr    string
++}
++
++// EqualityOperators holds the operator sets for both equality and
++// inequality comparisons.
++type EqualityOperators struct {
++	Equal    EqualityOperatorSet
++	NotEqual EqualityOperatorSet
++}
+diff --git a/tools/search/filter.go b/tools/search/filter.go
+index 58133658..9dcbb21e 100644
+--- a/tools/search/filter.go
++++ b/tools/search/filter.go
+@@ -4,7 +4,6 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+-	"os"
+ 	"strconv"
+ 	"strings"
+ 
+@@ -164,51 +163,100 @@ func resolveTokenizedExpr(expr fexpr.Expr, fieldResolver FieldResolver) (dbx.Exp
+ 		return nil, fmt.Errorf("invalid right operand %q - %v", expr.Right.Literal, rErr)
+ 	}
+ 
+-	return buildResolversExpr(lResult, expr.Op, rResult, likeEscapeClause(fieldResolver))
++	return buildResolversExpr(lResult, expr.Op, rResult, resolveDialectPrimitives(fieldResolver))
+ }
+ 
+-func likeEscapeClause(fieldResolver FieldResolver) string {
+-	if r, ok := fieldResolver.(interface{ LikeEscapeClause() string }); ok {
+-		return r.LikeEscapeClause()
++// dialectPrimitives bundles all dialect-specific SQL primitives needed
++// when building filter expressions.
++type dialectPrimitives struct {
++	LikeEscape         string
++	EqualityOps        EqualityOperators
++	LikeColumnContains func(column string) string
++}
++
++// dialectPrimitiveResolver is an optional capability interface that
++// resolvers can implement to provide dialect-specific SQL primitives.
++//
++// When a resolver does not implement this interface, SQLite defaults
++// are used (see defaultDialectPrimitives).
++type dialectPrimitiveResolver interface {
++	LikeEscapeClause() string
++	EqualityOperators() EqualityOperators
++	LikeColumnContainsExpr(column string) string
++}
++
++// resolveDialectPrimitives computes the dialect primitives from the
++// provided field resolver, falling back to SQLite defaults when the
++// resolver does not implement dialectPrimitiveResolver.
++func resolveDialectPrimitives(fieldResolver FieldResolver) dialectPrimitives {
++	if r, ok := fieldResolver.(dialectPrimitiveResolver); ok {
++		return dialectPrimitives{
++			LikeEscape:         r.LikeEscapeClause(),
++			EqualityOps:        r.EqualityOperators(),
++			LikeColumnContains: r.LikeColumnContainsExpr,
++		}
+ 	}
+ 
+-	return defaultLikeEscapeClause()
++	return defaultDialectPrimitives()
+ }
+ 
+-func defaultLikeEscapeClause() string {
+-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+-		return " ESCAPE '\\\\'"
++func defaultDialectPrimitives() dialectPrimitives {
++	return dialectPrimitives{
++		LikeEscape:  defaultLikeEscapeClause(),
++		EqualityOps: defaultEqualityOperators(),
++		LikeColumnContains: func(column string) string {
++			return fmt.Sprintf("'%%' || %s || '%%'", column)
++		},
+ 	}
++}
+ 
++func defaultLikeEscapeClause() string {
+ 	return " ESCAPE '\\'"
+ }
+ 
++func defaultEqualityOperators() EqualityOperators {
++	return EqualityOperators{
++		Equal: EqualityOperatorSet{
++			EqualOp:     "=",
++			NullEqualOp: "IS",
++			NullConcat:  "OR",
++			NullExpr:    "IS NULL",
++		},
++		NotEqual: EqualityOperatorSet{
++			EqualOp:     "IS NOT",
++			NullEqualOp: "IS NOT",
++			NullConcat:  "AND",
++			NullExpr:    "IS NOT NULL",
++		},
++	}
++}
++
+ func buildResolversExpr(
+ 	left *ResolverResult,
+ 	op fexpr.SignOp,
+ 	right *ResolverResult,
+-	likeEscape string,
++	primitives dialectPrimitives,
+ ) (dbx.Expression, error) {
+ 	var expr dbx.Expression
+ 
+ 	switch op {
+ 	case fexpr.SignEq, fexpr.SignAnyEq:
+-		expr = resolveEqualExpr(true, left, right)
++		expr = resolveEqualExpr(true, left, right, primitives.EqualityOps)
+ 	case fexpr.SignNeq, fexpr.SignAnyNeq:
+-		expr = resolveEqualExpr(false, left, right)
++		expr = resolveEqualExpr(false, left, right, primitives.EqualityOps)
+ 	case fexpr.SignLike, fexpr.SignAnyLike:
+ 		// the right side is a column and therefor wrap it with "%" for contains like behavior
+ 		if len(right.Params) == 0 {
+-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
++			expr = dbx.NewExp(fmt.Sprintf("%s LIKE (%s)%s", left.Identifier, primitives.LikeColumnContains(right.Identifier), primitives.LikeEscape), left.Params)
+ 		} else {
+-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
++			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, primitives.LikeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+ 		}
+ 	case fexpr.SignNlike, fexpr.SignAnyNlike:
+ 		// the right side is a column and therefor wrap it with "%" for not-contains like behavior
+ 		if len(right.Params) == 0 {
+-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
++			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE (%s)%s", left.Identifier, primitives.LikeColumnContains(right.Identifier), primitives.LikeEscape), left.Params)
+ 		} else {
+-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
++			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, primitives.LikeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+ 		}
+ 	case fexpr.SignLt, fexpr.SignAnyLt:
+ 		expr = dbx.NewExp(fmt.Sprintf("%s < %s", left.Identifier, right.Identifier), mergeParams(left.Params, right.Params))
+@@ -228,9 +276,10 @@ func buildResolversExpr(
+ 	if !isAnyMatchOp(op) {
+ 		if left.MultiMatchSubQuery != nil && right.MultiMatchSubQuery != nil {
+ 			mm := &manyVsManyExpr{
+-				left:  left,
+-				right: right,
+-				op:    op,
++				left:       left,
++				right:      right,
++				op:         op,
++				primitives: primitives,
+ 			}
+ 
+ 			expr = dbx.Enclose(dbx.And(expr, mm))
+@@ -240,6 +289,7 @@ func buildResolversExpr(
+ 				subQuery:     left.MultiMatchSubQuery,
+ 				op:           op,
+ 				otherOperand: right,
++				primitives:   primitives,
+ 			}
+ 
+ 			expr = dbx.Enclose(dbx.And(expr, mm))
+@@ -250,6 +300,7 @@ func buildResolversExpr(
+ 				op:           op,
+ 				otherOperand: left,
+ 				inverse:      true,
++				primitives:   primitives,
+ 			}
+ 
+ 			expr = dbx.Enclose(dbx.And(expr, mm))
+@@ -343,32 +394,17 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
+ // The expression `a = "" OR a is null` tends to perform better than
+ // `COALESCE(a, "") = ""` since the direct match can be accomplished
+ // with a seek while the COALESCE will induce a table scan.
+-func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
+-	isMySQL := strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql")
+-
+-	equalOp := "="
+-	nullEqualOp := "IS"
+-	concatOp := "OR"
+-	nullExpr := "IS NULL"
++func resolveEqualExpr(equal bool, left, right *ResolverResult, ops EqualityOperators) dbx.Expression {
++	set := ops.Equal
+ 	if !equal {
+-		// always use `IS NOT` instead of `!=` because direct non-equal comparisons
+-		// to nullable column values that are actually NULL yields to NULL instead of TRUE, eg.:
+-		// `'example' != nullableColumn` -> NULL even if nullableColumn row value is NULL
+-		//
+-		// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
+-		// `IS NOT TRUE`, etc.), so use `<>` for value comparisons while keeping
+-		// `IS NOT NULL` for the null check which works in both drivers.
+-		if isMySQL {
+-			equalOp = "<>"
+-			nullEqualOp = "<>"
+-		} else {
+-			equalOp = "IS NOT"
+-			nullEqualOp = equalOp
+-		}
+-		concatOp = "AND"
+-		nullExpr = "IS NOT NULL"
++		set = ops.NotEqual
+ 	}
+ 
++	equalOp := set.EqualOp
++	nullEqualOp := set.NullEqualOp
++	concatOp := set.NullConcat
++	nullExpr := set.NullExpr
++
+ 	// no coalesce fallback (eg. compare to a json field)
+ 	// a IS b
+ 	// a IS NOT b
+@@ -650,9 +686,10 @@ var _ dbx.Expression = (*manyVsManyExpr)(nil)
+ // Expects leftSubQuery and rightSubQuery to return a subquery with a
+ // single "multiMatchValue" column.
+ type manyVsManyExpr struct {
+-	left  *ResolverResult
+-	right *ResolverResult
+-	op    fexpr.SignOp
++	left       *ResolverResult
++	right      *ResolverResult
++	op         fexpr.SignOp
++	primitives dialectPrimitives
+ }
+ 
+ // Build converts the expression into a SQL fragment.
+@@ -679,7 +716,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 			// doesn't matter whether it is applied on the left or right subquery operand
+ 			AfterBuild: dbx.Not, // inverse for the not-exist expression
+ 		},
+-		defaultLikeEscapeClause(),
++		e.primitives,
+ 	)
+ 
+ 	if buildErr != nil {
+@@ -711,6 +748,7 @@ type manyVsOneExpr struct {
+ 	op           fexpr.SignOp
+ 	inverse      bool
+ 	nullFallback NullFallbackPreference
++	primitives   dialectPrimitives
+ }
+ 
+ // Build converts the expression into a SQL fragment.
+@@ -738,9 +776,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
+ 	var buildErr error
+ 
+ 	if e.inverse {
+-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause())
++		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, e.primitives)
+ 	} else {
+-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause())
++		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, e.primitives)
+ 	}
+ 
+ 	if buildErr != nil {
+diff --git a/tools/search/filter_test.go b/tools/search/filter_test.go
+index a5bf81e8..f1ebc035 100644
+--- a/tools/search/filter_test.go
++++ b/tools/search/filter_test.go
+@@ -4,6 +4,7 @@ import (
+ 	"context"
+ 	"database/sql"
+ 	"fmt"
++	"os"
+ 	"regexp"
+ 	"strings"
+ 	"testing"
+@@ -339,3 +340,445 @@ func TestLikeParamsWrapping(t *testing.T) {
+ 		t.Fatalf("Expected query \n%s, \ngot \n%s", expectedQuery, calledQueries[0])
+ 	}
+ }
++
++// dialectTestResolver wraps SimpleFieldResolver and implements the
++// dialectPrimitiveResolver interface for testing dialect-specific
++// equality and LIKE primitives.
++type dialectTestResolver struct {
++	*search.SimpleFieldResolver
++	escape   string
++	eqOps    search.EqualityOperators
++	contains func(column string) string
++}
++
++func (r *dialectTestResolver) LikeEscapeClause() string {
++	return r.escape
++}
++
++func (r *dialectTestResolver) EqualityOperators() search.EqualityOperators {
++	return r.eqOps
++}
++
++func (r *dialectTestResolver) LikeColumnContainsExpr(column string) string {
++	return r.contains(column)
++}
++
++func sqliteDialectTestResolver() *dialectTestResolver {
++	return &dialectTestResolver{
++		SimpleFieldResolver: search.NewSimpleFieldResolver("test1", "test2", "test3", `^test4_\w+$`, `^test5\.[\w\.\:]*\w+$`),
++		escape:              " ESCAPE '\\'",
++		eqOps: search.EqualityOperators{
++			Equal: search.EqualityOperatorSet{
++				EqualOp:     "=",
++				NullEqualOp: "IS",
++				NullConcat:  "OR",
++				NullExpr:    "IS NULL",
++			},
++			NotEqual: search.EqualityOperatorSet{
++				EqualOp:     "IS NOT",
++				NullEqualOp: "IS NOT",
++				NullConcat:  "AND",
++				NullExpr:    "IS NOT NULL",
++			},
++		},
++		contains: func(column string) string {
++			return fmt.Sprintf("'%%' || %s || '%%'", column)
++		},
++	}
++}
++
++func mysqlDialectTestResolver() *dialectTestResolver {
++	return &dialectTestResolver{
++		SimpleFieldResolver: search.NewSimpleFieldResolver("test1", "test2", "test3", `^test4_\w+$`, `^test5\.[\w\.\:]*\w+$`),
++		escape:              " ESCAPE '\\\\'",
++		eqOps: search.EqualityOperators{
++			Equal: search.EqualityOperatorSet{
++				EqualOp:     "=",
++				NullEqualOp: "IS",
++				NullConcat:  "OR",
++				NullExpr:    "IS NULL",
++			},
++			NotEqual: search.EqualityOperatorSet{
++				EqualOp:     "<>",
++				NullEqualOp: "<>",
++				NullConcat:  "AND",
++				NullExpr:    "IS NOT NULL",
++			},
++		},
++		contains: func(column string) string {
++			return fmt.Sprintf("CONCAT('%%', %s, '%%')", column)
++		},
++	}
++}
++
++func TestDialectEqualNullFallbackSQLite(t *testing.T) {
++	resolver := sqliteDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"column = null",
++			"test1 = null",
++			[]string{"[[test1]] = '' OR [[test1]] IS NULL"},
++		},
++		{
++			"null = column",
++			"null = test1",
++			[]string{"'' = [[test1]] OR [[test1]] IS NULL"},
++		},
++		{
++			"column = empty string",
++			"test1 = ''",
++			[]string{"[[test1]] = '' OR [[test1]] IS NULL"},
++		},
++		{
++			"two columns equal",
++			"test1 = test2",
++			[]string{"COALESCE([[test1]], '') = COALESCE([[test2]], '')"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++func TestDialectNotEqualNullFallbackSQLite(t *testing.T) {
++	resolver := sqliteDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"column != null",
++			"test1 != null",
++			[]string{"[[test1]] IS NOT '' AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"null != column",
++			"null != test1",
++			[]string{"'' IS NOT [[test1]] AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"column != empty string",
++			"test1 != ''",
++			[]string{"[[test1]] IS NOT '' AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"two columns not equal",
++			"test1 != test2",
++			[]string{"COALESCE([[test1]], '') IS NOT COALESCE([[test2]], '')"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++func TestDialectEqualNullFallbackMySQL(t *testing.T) {
++	resolver := mysqlDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"column = null",
++			"test1 = null",
++			[]string{"[[test1]] = '' OR [[test1]] IS NULL"},
++		},
++		{
++			"null = column",
++			"null = test1",
++			[]string{"'' = [[test1]] OR [[test1]] IS NULL"},
++		},
++		{
++			"column = empty string",
++			"test1 = ''",
++			[]string{"[[test1]] = '' OR [[test1]] IS NULL"},
++		},
++		{
++			"two columns equal",
++			"test1 = test2",
++			[]string{"COALESCE([[test1]], '') = COALESCE([[test2]], '')"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++func TestDialectNotEqualNullFallbackMySQL(t *testing.T) {
++	resolver := mysqlDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"column != null",
++			"test1 != null",
++			[]string{"[[test1]] <> '' AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"null != column",
++			"null != test1",
++			[]string{"'' <> [[test1]] AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"column != empty string",
++			"test1 != ''",
++			[]string{"[[test1]] <> '' AND [[test1]] IS NOT NULL"},
++		},
++		{
++			"two columns not equal",
++			"test1 != test2",
++			[]string{"COALESCE([[test1]], '') <> COALESCE([[test2]], '')"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++func TestDialectLikeColumnContainsSQLite(t *testing.T) {
++	resolver := sqliteDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"like with 2 columns",
++			"test1 ~ test2",
++			[]string{"[[test1]] LIKE ('%' || [[test2]] || '%') ESCAPE '\\'"},
++		},
++		{
++			"not like with 2 columns",
++			"test1 !~ test2",
++			[]string{"[[test1]] NOT LIKE ('%' || [[test2]] || '%') ESCAPE '\\'"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++func TestDialectLikeColumnContainsMySQL(t *testing.T) {
++	resolver := mysqlDialectTestResolver()
++
++	scenarios := []struct {
++		name        string
++		filterData  search.FilterData
++		expectParts []string
++	}{
++		{
++			"like with 2 columns",
++			"test1 ~ test2",
++			[]string{"[[test1]] LIKE (CONCAT('%', [[test2]], '%')) ESCAPE '\\\\'"},
++		},
++		{
++			"not like with 2 columns",
++			"test1 !~ test2",
++			[]string{"[[test1]] NOT LIKE (CONCAT('%', [[test2]], '%')) ESCAPE '\\\\'"},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			expr, err := s.filterData.BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("[%s] Unexpected error: %v", s.name, err)
++			}
++
++			rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++			for _, part := range s.expectParts {
++				if !strings.Contains(rawSql, part) {
++					t.Fatalf("[%s] Expected %q in expression: \n%v", s.name, part, rawSql)
++				}
++			}
++		})
++	}
++}
++
++// TestDialectPrimitivesCacheSafety verifies that building expressions with
++// different dialect resolvers in the same process does not leak dialect
++// primitives across cached filter expressions. The parsed filter cache is
++// keyed by raw filter string, so the same filter built first with one dialect
++// then another must produce dialect-correct output both times.
++func TestDialectPrimitivesCacheSafety(t *testing.T) {
++	filter := search.FilterData("test1 != test2 && test1 ~ test2")
++
++	// default-then-mysql
++	{
++		sqliteResolver := sqliteDialectTestResolver()
++		expr, err := filter.BuildExpr(sqliteResolver)
++		if err != nil {
++			t.Fatalf("default-then-mysql: first build error: %v", err)
++		}
++		rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++		if !strings.Contains(rawSql, "IS NOT") {
++			t.Fatalf("default-then-mysql: expected SQLite IS NOT in: %s", rawSql)
++		}
++		if !strings.Contains(rawSql, "||") {
++			t.Fatalf("default-then-mysql: expected SQLite || concat in: %s", rawSql)
++		}
++	}
++
++	{
++		mysqlResolver := mysqlDialectTestResolver()
++		expr, err := filter.BuildExpr(mysqlResolver)
++		if err != nil {
++			t.Fatalf("default-then-mysql: second build error: %v", err)
++		}
++		rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++		if !strings.Contains(rawSql, "<>") {
++			t.Fatalf("default-then-mysql: expected MySQL <> in: %s", rawSql)
++		}
++		if !strings.Contains(rawSql, "CONCAT") {
++			t.Fatalf("default-then-mysql: expected MySQL CONCAT in: %s", rawSql)
++		}
++	}
++
++	// mysql-then-default (separate filter string to avoid cache collision
++	// with the first sequence, since the cache is keyed by raw string only)
++	mysqlFilter := search.FilterData("test1 != test2 && test1 ~ test2")
++
++	{
++		mysqlResolver := mysqlDialectTestResolver()
++		expr, err := mysqlFilter.BuildExpr(mysqlResolver)
++		if err != nil {
++			t.Fatalf("mysql-then-default: first build error: %v", err)
++		}
++		rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++		if !strings.Contains(rawSql, "<>") {
++			t.Fatalf("mysql-then-default: expected MySQL <> in: %s", rawSql)
++		}
++		if !strings.Contains(rawSql, "CONCAT") {
++			t.Fatalf("mysql-then-default: expected MySQL CONCAT in: %s", rawSql)
++		}
++	}
++
++	{
++		sqliteResolver := sqliteDialectTestResolver()
++		expr, err := mysqlFilter.BuildExpr(sqliteResolver)
++		if err != nil {
++			t.Fatalf("mysql-then-default: second build error: %v", err)
++		}
++		rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++		if !strings.Contains(rawSql, "IS NOT") {
++			t.Fatalf("mysql-then-default: expected SQLite IS NOT in: %s", rawSql)
++		}
++		if !strings.Contains(rawSql, "||") {
++			t.Fatalf("mysql-then-default: expected SQLite || concat in: %s", rawSql)
++		}
++	}
++}
++
++// TestDefaultLikeEscapeClauseNoEnv verifies that the default like escape
++// clause (used when a resolver doesn't provide dialect primitives) always
++// returns the SQLite value regardless of env var, since tools/search
++// should no longer read env vars after the refactor.
++func TestDefaultLikeEscapeClauseNoEnv(t *testing.T) {
++	// This test ensures that even with PB_DATABASE_DRIVER=mysql, the
++	// SimpleFieldResolver (which doesn't implement dialectPrimitiveResolver)
++	// falls back to SQLite defaults.
++	os.Setenv("PB_DATABASE_DRIVER", "mysql")
++	defer os.Unsetenv("PB_DATABASE_DRIVER")
++
++	resolver := search.NewSimpleFieldResolver("test1", "test2")
++	filter := search.FilterData("test1 ~ test2")
++
++	expr, err := filter.BuildExpr(resolver)
++	if err != nil {
++		t.Fatalf("Unexpected error: %v", err)
++	}
++
++	rawSql := expr.Build(&dbx.DB{}, dbx.Params{})
++
++	// Should use SQLite escape (single backslash), not MySQL (double backslash)
++	if !strings.Contains(rawSql, `ESCAPE '\'`) {
++		t.Fatalf("Expected SQLite ESCAPE '\\' in: %s", rawSql)
++	}
++	if strings.Contains(rawSql, `ESCAPE '\\'`) {
++		t.Fatalf("Should not have MySQL ESCAPE '\\\\' in: %s", rawSql)
++	}
++}
+-- 
+2.54.0.windows.1
+

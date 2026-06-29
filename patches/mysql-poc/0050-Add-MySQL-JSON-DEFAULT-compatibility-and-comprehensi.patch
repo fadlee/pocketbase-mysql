@@ -1,7 +1,7 @@
 From 197c27bc1aa9308bc8a28bdce464fb637f57478b Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 13:26:02 +0700
-Subject: [PATCH 50/60] Add MySQL JSON DEFAULT compatibility and comprehensive
+Subject: [PATCH 50/91] Add MySQL JSON DEFAULT compatibility and comprehensive
  QA validation tests
 
 Modify GeoPointField to omit literal DEFAULT on MySQL JSON columns (disallowed by MySQL), applying zero value at application layer instead. Extend mysql-runtime-qa.mjs with argument validation, help text, improved error handling, multipart upload support, and new test sections covering validation rules, unique indexes, file fields, relations, auth collections, and view collections.

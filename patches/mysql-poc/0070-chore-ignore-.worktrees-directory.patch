@@ -1,0 +1,24 @@
+From a09b40b9c12476042648d0fa056d370ac43fbb2e Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 10:33:55 +0700
+Subject: [PATCH 70/91] chore: ignore .worktrees directory
+
+---
+ .gitignore | 1 +
+ 1 file changed, 1 insertion(+)
+
+diff --git a/.gitignore b/.gitignore
+index d0517f40..4900e6ac 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -21,6 +21,7 @@ LICENSE.html
+ 
+ # local runtime artifacts
+ /.agents/
++/.worktrees/
+ /pb_data/
+ /pb-mysql.log
+ /pb-server.log
+-- 
+2.54.0.windows.1
+

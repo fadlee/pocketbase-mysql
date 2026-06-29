@@ -1,0 +1,156 @@
+From c051ba8a27db1a88831f720d963118c32ee6a710 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 14:29:23 +0700
+Subject: [PATCH 91/91] docs: document dialect refactor migration notes
+
+---
+ AGENTS.md                       | 16 ++++++++-------
+ README.md                       | 15 ++++++++++++++
+ docs/mysql-gap-analysis.md      | 36 +++++++++++++++++++++++++++++++++
+ docs/mysql-upstream-workflow.md | 13 ++++++------
+ 4 files changed, 67 insertions(+), 13 deletions(-)
+
+diff --git a/AGENTS.md b/AGENTS.md
+index 9d94cdde..b932d3e4 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -23,7 +23,7 @@ When upgrading to a new upstream PocketBase version:
+ 
+ 1. **Export patches first** — run `node scripts/export-mysql-patches.mjs <current-base>` before switching branches.
+ 
+-2. **Scan new migrations for SQLite-specific code** — grep for `sqlite_master`, `sqlite_schema`, `PRAGMA`, `randomblob`, `strftime`, `_rowid_`. Add MySQL early-return guards where needed.
++2. **Scan new migrations for SQLite-specific code** — grep for `sqlite_master`, `sqlite_schema`, `PRAGMA`, `randomblob`, `strftime`, `_rowid_`. Add dialect early-return guards (`txApp.Dialect().Name() != core.DialectSQLiteName`) where needed.
+ 
+ 3. **Skip `ui/dist` conflicts during replay** — bundle hashes always differ. Skip patches that only conflict in `ui/dist`, then run `cd ui && npm run build` once at the end.
+ 
+@@ -39,16 +39,18 @@ When upgrading to a new upstream PocketBase version:
+ 
+ ## MySQL-Specific Patterns
+ 
+-- New upstream migrations that query `sqlite_master` or `sqlite_schema` need an early return:
++- New upstream migrations that query `sqlite_master` or `sqlite_schema` need an early return for non-SQLite dialects:
+   ```go
+-  if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++  if txApp.Dialect().Name() != core.DialectSQLiteName {
+       return nil
+   }
+   ```
+-- Sort expressions using `_rowid_` need a MySQL fallback resolving to `id`.
+-- `LIKE` filter escaping differs between SQLite and MySQL.
+-- Partial indexes (`WHERE` clause in `CREATE INDEX`) are not supported in MySQL — use regular indexes.
++- Sort expressions using `_rowid_` are handled by the dialect's `rowidDialect` capability — SQLite uses `_rowid_`, MySQL resolves to `id`.
++- `LIKE` filter escaping differs between SQLite and MySQL and is handled by the `equalityDialect` capability.
++- Partial indexes (`WHERE` clause in `CREATE INDEX`) are not supported in MySQL — the `schemaSyncDialect` capability strips the WHERE clause for MySQL.
+ - UI source should use portable sort fields (`-created,-id`) instead of `@rowid`.
++- New MySQL-specific SQL behavior should be added as a method on the appropriate dialect capability interface in `core/db_dialect.go`, not as a scattered `isMySQLDataDB` conditional.
++- `tools/dbutils.JSONEach`, `JSONExtract`, and `JSONArrayLength` are SQLite/default helpers. Use `app.Dialect()` capability methods for dialect-aware behavior.
+ 
+ ## Build & Test
+ 
+@@ -81,7 +83,7 @@ git switch --create mysql/rebase-v0.39.5 v0.39.5
+ 
+ # 3. Scan new migrations for SQLite-specific code
+ git diff v0.39.4..v0.39.5 -- migrations/ | grep -i "sqlite\|pragma\|rowid"
+-# Add MySQL early-return guards where needed
++# Add dialect early-return guards where needed
+ 
+ # 4. Apply patch stack
+ git am --3way patches/mysql-poc/*.patch
+diff --git a/README.md b/README.md
+index f66b40f3..4c8971dd 100644
+--- a/README.md
++++ b/README.md
+@@ -27,6 +27,21 @@ Important scope notes:
+ - The fork currently targets verified MySQL runtime compatibility for the covered features below.
+ - Auxiliary/log DB still follows the existing SQLite path during the PoC.
+ 
++## Dialect Abstraction
++
++As of the dialect refactor, MySQL-specific behavior is no longer scattered across the codebase as `isMySQLDataDB()` conditionals. Instead, a `core.Dialect` interface with narrow capability methods routes all data-DB SQL through `app.Dialect()`.
++
++### Public API changes
++
++- **`core.App` interface** now requires a `Dialect() core.Dialect` method. External code that manually implements `core.App` must add this method or embed `*core.BaseApp`.
++- **`tools/search.TokenFunctions`** callable signature changed. Token functions now receive a `FieldResolver` as the first parameter so they can access dialect capabilities.
++- **`tools/dbutils.JSONEach`, `JSONExtract`, `JSONArrayLength`** are now SQLite/default helpers. They no longer check `PB_DATABASE_DRIVER` and always return SQLite expressions. Call sites that need dialect-aware behavior use the `core.Dialect` capability interfaces instead.
++
++### MySQL requirements
++
++- MySQL JSON_TABLE support requires **Oracle MySQL 8.0+**. MariaDB is not supported unless separately implemented and tested.
++- The `PB_DATABASE_DRIVER=mysql` env var is still used at boot time to select the MySQL dialect, but it is no longer read at individual call sites.
++
+ ## Branch Strategy
+ 
+ Recommended branch layout for this fork:
+diff --git a/docs/mysql-gap-analysis.md b/docs/mysql-gap-analysis.md
+index 3bd6103f..d0ab8c53 100644
+--- a/docs/mysql-gap-analysis.md
++++ b/docs/mysql-gap-analysis.md
+@@ -455,3 +455,39 @@ The MySQL view fixes required:
+ 
+ - adding aliases to derived-table wrappers used during persistent view creation and temp-view introspection,
+ - avoiding repeated MySQL rewrapping when the normalized `id` column is already `CHAR`/`VARCHAR`.
++
++## Dialect Refactor Milestone
++
++### Motivation
++
++The previous PoC seams routed MySQL-specific behavior through scattered `isMySQLDataDB(app)` / `IsMySQLDataDB(app)` conditionals and direct `os.Getenv("PB_DATABASE_DRIVER")` checks at individual call sites. This made the MySQL surface hard to maintain, easy to miss during upstream rebases, and inconsistent across subsystems.
++
++### What was done
++
++MySQL-specific behavior is now routed through a `core.Dialect` interface defined in `core/db_dialect.go`. The interface exposes narrow capability methods instead of a single driver-name switch. Both `SQLiteDialect` and `MySQLDialect` implement all capability interfaces, and `DialectForDriver()` selects the dialect at boot time from `PB_DATABASE_DRIVER`.
++
++Capability interfaces added:
++
++- `columnDialect` — column type/DDL generation differences.
++- `introspectionDialect` — table/column/index metadata lookups (`information_schema` vs `sqlite_master`).
++- `equalityDialect` — `LIKE` escape clause differences.
++- `rowidDialect` — `_rowid_` vs `id` count/sort resolution.
++- `jsonEachDialect` — `json_each` vs MySQL relation-array join strategy.
++- `jsonLengthDialect` — JSON array length expression differences.
++- `jsonExtractDialect` — `json_extract` vs MySQL JSON path extraction.
++- `strftimeDialect` — `strftime` vs MySQL timestamp expression.
++- `queryViewDialect` — view creation/introspection SQL differences.
++- `schemaSyncDialect` — partial-index `WHERE` stripping and add-column strategy.
++- `maintenanceDialect` — `PRAGMA optimize` vs MySQL no-op.
++- `migrationDialect` — migration metadata column type (`INTEGER` vs `BIGINT`).
++- `relationJoinDialect` — relation-many join SQL generation.
++
++### Call-site cleanup
++
++- All `isMySQLDataDB(app)` and `IsMySQLDataDB(app)` conditionals have been removed from the codebase.
++- `tools/dbutils.JSONEach`, `JSONExtract`, and `JSONArrayLength` no longer check `PB_DATABASE_DRIVER`. They are now SQLite/default helpers; dialect-aware call sites use the `core.Dialect` capability interfaces instead.
++- Migration early-return guards now use `txApp.Dialect().Name() != core.DialectSQLiteName` instead of `os.Getenv("PB_DATABASE_DRIVER")`.
++
++### Verification
++
++The refactor was verified with the MySQL runtime QA script (`scripts/mysql-runtime-qa.mjs`) against a fresh MySQL 8.4 container. All previously covered runtime probes (boot, superuser auth, collection/record CRUD, schema update matrix, relation-many, view collections, LIKE filter) continue to pass after the dialect abstraction.
+diff --git a/docs/mysql-upstream-workflow.md b/docs/mysql-upstream-workflow.md
+index 915cdecb..9be16379 100644
+--- a/docs/mysql-upstream-workflow.md
++++ b/docs/mysql-upstream-workflow.md
+@@ -134,13 +134,14 @@ GitHub container publishing:
+ 
+ ## Refactor Boundaries
+ 
+-Keep MySQL-specific code behind small seams where possible:
++MySQL-specific behavior is routed through a `core.Dialect` interface rather than scattered conditionals:
+ 
+-- `core/db_dialect.go`: data DB driver detection and environment constants.
++- `core/db_dialect.go` exports the `Dialect` interface, `SQLiteDialect`, `MySQLDialect`, `DialectForDriver()`, and exported helper functions (`CollectionsTableDDLFor`, `ParamsTableDDLFor`, `MigrationAppliedColumnTypeFor`).
++- The dialect uses narrow unexported capability interfaces (`columnDialect`, `introspectionDialect`, `equalityDialect`, `rowidDialect`, `jsonEachDialect`, `jsonLengthDialect`, `jsonExtractDialect`, `strftimeDialect`, `queryViewDialect`, `schemaSyncDialect`, `maintenanceDialect`, `migrationDialect`, `relationJoinDialect`) that are type-asserted at call sites via `app.Dialect()`.
++- Both `SQLiteDialect` and `MySQLDialect` implement all capability interfaces.
+ - `core/db_connect.go`: MySQL data DB routing; auxiliary DB remains SQLite for the PoC.
+-- `core/db_table.go`: data DB table, column, and index metadata lookups.
+-- `core/collection_validate.go`: index-name validation metadata lookup.
+-- `core/collection_record_table_sync.go` and `core/base.go`: SQLite-only maintenance such as `PRAGMA optimize`.
+-- `tools/search/filter.go` plus `core/record_field_resolver.go`: SQL fragments that need dialect-specific escaping.
++- `tools/search/filter.go` plus `core/record_field_resolver.go`: SQL fragments that need dialect-specific escaping use the `equalityDialect` capability.
++
++New MySQL-specific behavior should be added as a new capability method on the appropriate dialect interface in `core/db_dialect.go`, not as an `isMySQLDataDB` conditional. The `isMySQLDataDB` and `IsMySQLDataDB` functions have been removed and should not be reintroduced.
+ 
+ Do not broaden the abstraction prematurely. Migration branching, field DDL differences, and partial-index normalization are still PoC seams and should be moved only when the relevant behavior has enough QA coverage.
+-- 
+2.54.0.windows.1
+

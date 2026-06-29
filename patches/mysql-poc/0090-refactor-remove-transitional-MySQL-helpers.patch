@@ -1,0 +1,454 @@
+From 4d921320d9680f50b848e9c6aadd771e843f09a6 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 14:25:26 +0700
+Subject: [PATCH 90/91] refactor: remove transitional MySQL helpers
+
+---
+ core/db_dialect.go                   | 89 ++++++++++++++++++++++------
+ core/db_dialect_test.go              | 19 +++++-
+ core/field_geo_point.go              |  2 +-
+ core/record_field_resolver_runner.go | 46 ++++++++------
+ core/record_model.go                 |  6 +-
+ core/record_query_expand.go          |  6 +-
+ tools/dbutils/json.go                | 18 +-----
+ tools/dbutils/json_test.go           | 16 ++---
+ 8 files changed, 140 insertions(+), 62 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 99f3ec07..4e7943c7 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -26,7 +26,7 @@ const (
+ // Dialect describes the SQL dialect used by the app's data database.
+ //
+ // It is intentionally minimal (only exposing Name()) and is meant to be
+-// used as a replacement for the scattered isMySQLDataDB conditionals.
++// used as a replacement for the scattered driver-name conditionals.
+ type Dialect interface {
+ 	Name() string
+ }
+@@ -304,6 +304,35 @@ type migrationDialect interface {
+ 	MigrationAppliedColumnType() string
+ }
+ 
++// relationJoinDialect is a local (unexported) capability interface that
++// exposes dialect-specific relation join SQL generation.
++//
++// The key difference is that MySQL uses JSON_CONTAINS for multi-value
++// relation joins (single join with array membership check), while SQLite
++// uses json_each subquery expansion (two joins — raw table + equality).
++type relationJoinDialect interface {
++	// UseJSONContainsForMultiRelations returns true if the dialect uses
++	// JSON_CONTAINS for multi-value relation joins.
++	//
++	// For SQLite: false (uses json_each subquery expansion)
++	// For MySQL: true (uses JSON_CONTAINS in ON clause)
++	UseJSONContainsForMultiRelations() bool
++
++	// RelationValueEqualsExpr returns a SQL expression for comparing two
++	// relation values for equality.
++	//
++	// For SQLite: "left = right"
++	// For MySQL: "BINARY left = BINARY right"
++	RelationValueEqualsExpr(left, right string) string
++
++	// RelationArrayContainsExpr returns a SQL expression for checking if
++	// an array column contains a value.
++	//
++	// For MySQL: "JSON_CONTAINS(arrayCol, JSON_QUOTE(idCol))"
++	// For SQLite: "" (uses json_each subquery instead)
++	RelationArrayContainsExpr(arrayCol, idCol string) string
++}
++
+ // queryViewDialectIfAvailable returns the queryViewDialect capability if
+ // the provided dialect implements it, or nil otherwise.
+ func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
+@@ -331,6 +360,15 @@ func maintenanceDialectIfAvailable(d Dialect) maintenanceDialect {
+ 	return nil
+ }
+ 
++// relationJoinDialectIfAvailable returns the relationJoinDialect capability if
++// the provided dialect implements it, or nil otherwise.
++func relationJoinDialectIfAvailable(d Dialect) relationJoinDialect {
++	if rjd, ok := d.(relationJoinDialect); ok {
++		return rjd
++	}
++	return nil
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -639,6 +677,23 @@ func (SQLiteDialect) MigrationAppliedColumnType() string {
+ 	return "INTEGER"
+ }
+ 
++// UseJSONContainsForMultiRelations implements the [relationJoinDialect] interface.
++func (SQLiteDialect) UseJSONContainsForMultiRelations() bool {
++	return false
++}
++
++// RelationValueEqualsExpr implements the [relationJoinDialect] interface.
++func (SQLiteDialect) RelationValueEqualsExpr(left, right string) string {
++	return fmt.Sprintf("%s = %s", left, right)
++}
++
++// RelationArrayContainsExpr implements the [relationJoinDialect] interface.
++//
++// SQLite uses json_each subquery expansion instead of JSON_CONTAINS.
++func (SQLiteDialect) RelationArrayContainsExpr(arrayCol, idCol string) string {
++	return ""
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -1059,6 +1114,21 @@ func (MySQLDialect) MigrationAppliedColumnType() string {
+ 	return "BIGINT"
+ }
+ 
++// UseJSONContainsForMultiRelations implements the [relationJoinDialect] interface.
++func (MySQLDialect) UseJSONContainsForMultiRelations() bool {
++	return true
++}
++
++// RelationValueEqualsExpr implements the [relationJoinDialect] interface.
++func (MySQLDialect) RelationValueEqualsExpr(left, right string) string {
++	return fmt.Sprintf("BINARY %s = BINARY %s", left, right)
++}
++
++// RelationArrayContainsExpr implements the [relationJoinDialect] interface.
++func (MySQLDialect) RelationArrayContainsExpr(arrayCol, idCol string) string {
++	return fmt.Sprintf("JSON_CONTAINS(%s, JSON_QUOTE(%s))", arrayCol, idCol)
++}
++
+ // translateStrftimeFormat converts SQLite strftime format tokens to MySQL
+ // DATE_FORMAT tokens.
+ //
+@@ -1116,23 +1186,6 @@ func DialectForDriver(driverName string) Dialect {
+ 	return SQLiteDialect{}
+ }
+ 
+-func isMySQLDataDB(app App) bool {
+-	return IsMySQLDataDB(app)
+-}
+-
+-func IsMySQLDataDB(app App) bool {
+-	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") {
+-		return true
+-	}
+-
+-	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+-	return ok && strings.EqualFold(db.DriverName(), "mysql")
+-}
+-
+-func jsonArrayColumnType(app App) string {
+-	return app.Dialect().(columnDialect).JSONArrayColumnType()
+-}
+-
+ // CollectionsTableDDLFor returns the system _collections table DDL for the
+ // provided dialect, falling back to the SQLite default when the dialect
+ // does not implement the migrationDialect capability.
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index d2d54cfa..b042809e 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -21,7 +21,7 @@ func TestEnvForcedMySQLBootstrapWithSQLiteTestApp(t *testing.T) {
+ 	require.NoError(t, err)
+ 	defer app.Cleanup()
+ 
+-	require.True(t, core.IsMySQLDataDB(app))
++	require.Equal(t, core.DialectMySQLName, app.Dialect().Name())
+ }
+ 
+ func TestDialectForDriver(t *testing.T) {
+@@ -278,3 +278,20 @@ func TestMigrationDialectHelpers(t *testing.T) {
+ 	require.NotEmpty(t, noopDDL)
+ 	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(noopDialect{}))
+ }
++
++func TestRelationJoinDialectSQLite(t *testing.T) {
++	d := core.SQLiteDialect{}
++
++	require.False(t, d.UseJSONContainsForMultiRelations())
++	require.Equal(t, "a = b", d.RelationValueEqualsExpr("a", "b"))
++	require.Empty(t, d.RelationArrayContainsExpr("a", "b"))
++}
++
++func TestRelationJoinDialectMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	require.True(t, d.UseJSONContainsForMultiRelations())
++	require.Equal(t, "BINARY a = BINARY b", d.RelationValueEqualsExpr("a", "b"))
++	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_CONTAINS")
++	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_QUOTE")
++}
+diff --git a/core/field_geo_point.go b/core/field_geo_point.go
+index 7e41b79a..a585dd77 100644
+--- a/core/field_geo_point.go
++++ b/core/field_geo_point.go
+@@ -109,7 +109,7 @@ func (f *GeoPointField) SetHidden(hidden bool) {
+ func (f *GeoPointField) ColumnType(app App) string {
+ 	// MySQL disallows literal DEFAULT values on JSON columns; the zero
+ 	// value ({"lon":0,"lat":0}) is supplied at the application layer
+-	// (see PrepareValue), mirroring jsonArrayColumnType.
++	// (see PrepareValue), mirroring the dialect's JSON column type handling.
+ 	return app.Dialect().(columnDialect).JSONValueColumnType(`{"lon":0,"lat":0}`)
+ }
+ 
+diff --git a/core/record_field_resolver_runner.go b/core/record_field_resolver_runner.go
+index a90a26d7..f44cb4ad 100644
+--- a/core/record_field_resolver_runner.go
++++ b/core/record_field_resolver_runner.go
+@@ -59,21 +59,31 @@ type runner struct {
+ }
+ 
+ func relationValueEquals(resolver *RecordFieldResolver, leftIdentifier string, rightIdentifier string) string {
+-	if isMySQLDataDB(resolver.app) {
+-		return fmt.Sprintf("BINARY %s = BINARY %s", leftIdentifier, rightIdentifier)
++	if d := relationJoinDialectIfAvailable(resolver.app.Dialect()); d != nil {
++		return d.RelationValueEqualsExpr(leftIdentifier, rightIdentifier)
+ 	}
+ 
+ 	return fmt.Sprintf("%s = %s", leftIdentifier, rightIdentifier)
+ }
+ 
+ func relationArrayContainsIdentifier(resolver *RecordFieldResolver, jsonArrayIdentifier string, idIdentifier string) string {
+-	if isMySQLDataDB(resolver.app) {
+-		return fmt.Sprintf("JSON_CONTAINS(%s, JSON_QUOTE(%s))", jsonArrayIdentifier, idIdentifier)
++	if d := relationJoinDialectIfAvailable(resolver.app.Dialect()); d != nil {
++		return d.RelationArrayContainsExpr(jsonArrayIdentifier, idIdentifier)
+ 	}
+ 
+ 	return ""
+ }
+ 
++// jsonEachColumnExpr returns the dialect-aware JSONEach column expression
++// for the provided field name, falling back to dbutils.JSONEach when no
++// dialect is available.
++func jsonEachColumnExpr(resolver *RecordFieldResolver, fieldName string) string {
++	if d := resolver.jsonEachDialectIfAvailable(); d != nil {
++		return d.JSONEachColumnExpr(fieldName)
++	}
++	return dbutils.JSONEach(fieldName)
++}
++
+ func (r *runner) run() (*search.ResolverResult, error) {
+ 	if r.used {
+ 		return nil, errors.New("the runner was already used")
+@@ -608,14 +618,14 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 			} else {
+ 				jeAlias := "__je_" + newTableAlias
+ 				var on dbx.Expression
+-				if isMySQLDataDB(r.resolver.app) {
++				if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
+ 					on = dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias+"."+cleanBackFieldName+"]]", "[["+r.activeTableAlias+".id]]"))
+ 				} else {
+ 					on = dbx.NewExp(fmt.Sprintf(
+ 						"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+ 						r.activeTableAlias,
+ 						jeAlias,
+-						dbutils.JSONEach(newTableAlias+"."+cleanBackFieldName),
++						jsonEachColumnExpr(r.resolver, newTableAlias+"."+cleanBackFieldName),
+ 						jeAlias,
+ 					))
+ 				}
+@@ -660,7 +670,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 						TableName:  newCollectionName,
+ 						TableAlias: newTableAlias2,
+ 						On: func() dbx.Expression {
+-							if isMySQLDataDB(r.resolver.app) {
++							if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
+ 								return dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias2+"."+cleanBackFieldName+"]]", "[["+r.multiMatchActiveTableAlias+".id]]"))
+ 							}
+ 
+@@ -668,7 +678,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 								"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
+ 								r.multiMatchActiveTableAlias,
+ 								jeAlias2,
+-								dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
++								jsonEachColumnExpr(r.resolver, newTableAlias2+"."+cleanBackFieldName),
+ 								jeAlias2,
+ 							))
+ 						}(),
+@@ -723,7 +733,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				return nil, err
+ 			}
+ 		} else {
+-			if isMySQLDataDB(r.resolver.app) {
++			if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
+ 				err := r.resolver.registerJoin(
+ 					inflector.Columnify(newCollectionName),
+ 					newTableAlias,
+@@ -736,10 +746,10 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				jeAlias := "__je_" + newTableAlias
+ 
+ 				var onClause dbx.Expression
+-				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+-					onClause = d.JSONEachOnClause()
++				if jed := r.resolver.jsonEachDialectIfAvailable(); jed != nil {
++					onClause = jed.JSONEachOnClause()
+ 				}
+-				err := r.resolver.registerJoinExpr(dbutils.JSONEach(prefixedFieldName), jeAlias, onClause)
++				err := r.resolver.registerJoinExpr(jsonEachColumnExpr(r.resolver, prefixedFieldName), jeAlias, onClause)
+ 				if err != nil {
+ 					return nil, err
+ 				}
+@@ -779,7 +789,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 				},
+ 			)
+ 		} else {
+-			if isMySQLDataDB(r.resolver.app) {
++			if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
+ 				r.multiMatch.Joins = append(
+ 					r.multiMatch.Joins,
+ 					&search.Join{
+@@ -791,13 +801,13 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
+ 			} else {
+ 				jeAlias2 := r.multiMatchActiveTableAlias + "_" + cleanFieldName + "_je"
+ 				var mmOnClause dbx.Expression
+-				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+-					mmOnClause = d.JSONEachOnClause()
++				if jed := r.resolver.jsonEachDialectIfAvailable(); jed != nil {
++					mmOnClause = jed.JSONEachOnClause()
+ 				}
+ 				r.multiMatch.Joins = append(
+ 					r.multiMatch.Joins,
+ 					&search.Join{
+-						TableName:    dbutils.JSONEach(prefixedFieldName2),
++						TableName:    jsonEachColumnExpr(r.resolver, prefixedFieldName2),
+ 						TableAlias:   jeAlias2,
+ 						On:           mmOnClause,
+ 						RawTableExpr: true,
+@@ -883,7 +893,7 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
+ 		if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+ 			onClause = d.JSONEachOnClause()
+ 		}
+-		err := r.resolver.registerJoinExpr(dbutils.JSONEach(jePair), jeAlias, onClause)
++		err := r.resolver.registerJoinExpr(jsonEachColumnExpr(r.resolver, jePair), jeAlias, onClause)
+ 		if err != nil {
+ 			return nil, err
+ 		}
+@@ -901,7 +911,7 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
+ 			jeAlias2 := "__je_" + r.multiMatchActiveTableAlias + "_" + cleanFieldName + r.resolver.joinAliasSuffix
+ 
+ 			r.multiMatch.Joins = append(r.multiMatch.Joins, &search.Join{
+-				TableName:    dbutils.JSONEach(jePair2),
++				TableName:    jsonEachColumnExpr(r.resolver, jePair2),
+ 				TableAlias:   jeAlias2,
+ 				On:           onClause,
+ 				RawTableExpr: true,
+diff --git a/core/record_model.go b/core/record_model.go
+index 7d578f2d..d3585f32 100644
+--- a/core/record_model.go
++++ b/core/record_model.go
+@@ -1531,9 +1531,13 @@ func cascadeRecordDelete(app App, mainRecord *Record, refs map[*Collection][]Fie
+ 			if opt, ok := field.(MultiValuer); !ok || !opt.IsMultiple() {
+ 				query.AndWhere(dbx.HashExp{prefixedFieldName: mainRecord.Id})
+ 			} else {
++				jsonEachExpr := dbutils.JSONEach(prefixedFieldName)
++				if d, ok := app.Dialect().(jsonEachDialect); ok {
++					jsonEachExpr = d.JSONEachColumnExpr(prefixedFieldName)
++				}
+ 				query.AndWhere(dbx.Exists(dbx.NewExp(fmt.Sprintf(
+ 					`SELECT 1 FROM %s {{__je__}} WHERE [[__je__.value]]={:jevalue}`,
+-					dbutils.JSONEach(prefixedFieldName),
++					jsonEachExpr,
+ 				), dbx.Params{
+ 					"jevalue": mainRecord.Id,
+ 				})))
+diff --git a/core/record_query_expand.go b/core/record_query_expand.go
+index c8472d2d..83813db7 100644
+--- a/core/record_query_expand.go
++++ b/core/record_query_expand.go
+@@ -108,9 +108,13 @@ func (app *BaseApp) expandRecords(records []*Record, expandPath string, fetchFun
+ 				Limit(1000) // the limit is arbitrary chosen and may change in the future
+ 
+ 			if indirectRelField.IsMultiple() {
++				jsonEachExpr := dbutils.JSONEach(indirectRelField.Name)
++				if d, ok := app.Dialect().(jsonEachDialect); ok {
++					jsonEachExpr = d.JSONEachColumnExpr(indirectRelField.Name)
++				}
+ 				q.AndWhere(dbx.Exists(dbx.NewExp(fmt.Sprintf(
+ 					"SELECT 1 FROM %s je WHERE je.value = {:id}",
+-					dbutils.JSONEach(indirectRelField.Name),
++					jsonEachExpr,
+ 				))))
+ 			} else {
+ 				q.AndWhere(dbx.NewExp("[[" + indirectRelField.Name + "]] = {:id}"))
+diff --git a/tools/dbutils/json.go b/tools/dbutils/json.go
+index 9f0d5571..97aff1bc 100644
+--- a/tools/dbutils/json.go
++++ b/tools/dbutils/json.go
+@@ -2,27 +2,15 @@ package dbutils
+ 
+ import (
+ 	"fmt"
+-	"os"
+ 	"strings"
+ )
+ 
+-// JSONEach returns JSON_EACH SQLite string expression with
++// JSONEach returns the json_each SQLite string expression with
+ // some normalizations for non-json columns.
+ //
+-// Transitional: this helper still checks PB_DATABASE_DRIVER for unmigrated
+-// call sites in core/view.go, core/record_query_expand.go, and
+-// core/record_model.go. The dialect methods (SQLiteDialect.JSONEachColumnExpr,
+-// MySQLDialect.JSONEachColumnExpr) do NOT use this helper and are
+-// env-var-independent. The env var check will be removed in Task 11.1
+-// once all call sites are migrated to use the dialect.
++// This is a SQLite/default helper. Call sites that need dialect-aware
++// behavior should use the jsonEachDialect capability interface instead.
+ func JSONEach(column string) string {
+-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+-		return fmt.Sprintf(
+-			`JSON_TABLE(CASE WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY' THEN [[%s]] ELSE JSON_ARRAY([[%s]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
+-			column, column, column, column,
+-		)
+-	}
+-
+ 	// note: we are not using the new and shorter "if(x,y)" syntax for
+ 	// compatibility with custom drivers that use older SQLite version
+ 	return fmt.Sprintf(
+diff --git a/tools/dbutils/json_test.go b/tools/dbutils/json_test.go
+index 49deb089..fbb5bd5d 100644
+--- a/tools/dbutils/json_test.go
++++ b/tools/dbutils/json_test.go
+@@ -16,24 +16,26 @@ func TestJSONEach(t *testing.T) {
+ 	}
+ }
+ 
+-func TestJSONEachEnvVarTransitional(t *testing.T) {
+-	// Transitional: JSONEach still checks PB_DATABASE_DRIVER for unmigrated
+-	// call sites. This test documents that behavior.
++func TestJSONEachEnvVarIndependent(t *testing.T) {
++	// JSONEach is now a SQLite-only helper and must return the SQLite
++	// expression regardless of the PB_DATABASE_DRIVER env var.
++	// Call sites that need dialect-aware behavior use the
++	// jsonEachDialect capability interface instead.
++
++	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
+ 
+ 	// SQLite (default)
+ 	t.Setenv("PB_DATABASE_DRIVER", "")
+ 	result := dbutils.JSONEach("a.b")
+-	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
+ 	if result != expected {
+ 		t.Fatalf("Expected SQLite expression\n%v\ngot\n%v", expected, result)
+ 	}
+ 
+-	// MySQL
++	// MySQL env var should NOT change the output
+ 	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+ 	result = dbutils.JSONEach("a.b")
+-	expected = "JSON_TABLE(CASE WHEN JSON_VALID([[a.b]]) AND JSON_TYPE([[a.b]]) = 'ARRAY' THEN [[a.b]] ELSE JSON_ARRAY([[a.b]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))"
+ 	if result != expected {
+-		t.Fatalf("Expected MySQL expression\n%v\ngot\n%v", expected, result)
++		t.Fatalf("Expected SQLite expression regardless of env var\n%v\ngot\n%v", expected, result)
+ 	}
+ }
+ 
+-- 
+2.54.0.windows.1
+
