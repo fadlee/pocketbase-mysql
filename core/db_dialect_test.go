@@ -150,3 +150,31 @@ func TestCountOverrideColumnMySQL(t *testing.T) {
 		require.Equal(t, "", col)
 	})
 }
+
+func TestJSONEachColumnExprSQLite(t *testing.T) {
+	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
+
+	// Test with PB_DATABASE_DRIVER unset/empty — should return SQLite expression
+	t.Setenv("PB_DATABASE_DRIVER", "")
+	result := core.SQLiteDialect{}.JSONEachColumnExpr("a.b")
+	require.Equal(t, expected, result)
+
+	// Test with PB_DATABASE_DRIVER=mysql — should still return SQLite expression
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+	result = core.SQLiteDialect{}.JSONEachColumnExpr("a.b")
+	require.Equal(t, expected, result, "SQLiteDialect must return SQLite expression regardless of env var")
+}
+
+func TestJSONEachColumnExprMySQL(t *testing.T) {
+	expected := "JSON_TABLE(CASE WHEN JSON_VALID([[a.b]]) AND JSON_TYPE([[a.b]]) = 'ARRAY' THEN [[a.b]] ELSE JSON_ARRAY([[a.b]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))"
+
+	// Test with PB_DATABASE_DRIVER unset/empty — should return MySQL expression
+	t.Setenv("PB_DATABASE_DRIVER", "")
+	result := core.MySQLDialect{}.JSONEachColumnExpr("a.b")
+	require.Equal(t, expected, result)
+
+	// Test with PB_DATABASE_DRIVER=mysql — should still return MySQL expression
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+	result = core.MySQLDialect{}.JSONEachColumnExpr("a.b")
+	require.Equal(t, expected, result, "MySQLDialect must return MySQL expression regardless of env var")
+}

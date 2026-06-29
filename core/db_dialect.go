@@ -261,8 +261,17 @@ func (SQLiteDialect) CountOverrideColumn(isView bool) (string, bool) {
 }
 
 // JSONEachColumnExpr implements the [jsonEachDialect] interface.
+//
+// Returns the SQLite json_each expression directly rather than delegating
+// to dbutils.JSONEach, so the result is always SQLite regardless of
+// PB_DATABASE_DRIVER env var.
 func (SQLiteDialect) JSONEachColumnExpr(column string) string {
-	return dbutils.JSONEach(column)
+	// note: we are not using the new and shorter "if(x,y)" syntax for
+	// compatibility with custom drivers that use older SQLite version
+	return fmt.Sprintf(
+		`json_each(CASE WHEN iif(json_valid([[%s]]), json_type([[%s]])='array', FALSE) THEN [[%s]] ELSE json_array([[%s]]) END)`,
+		column, column, column, column,
+	)
 }
 
 // JSONEachParamExpr implements the [jsonEachDialect] interface.
@@ -425,8 +434,15 @@ func (MySQLDialect) CountOverrideColumn(isView bool) (string, bool) {
 }
 
 // JSONEachColumnExpr implements the [jsonEachDialect] interface.
+//
+// Returns the MySQL JSON_TABLE expression directly rather than delegating
+// to dbutils.JSONEach, so the result is always MySQL regardless of
+// PB_DATABASE_DRIVER env var.
 func (MySQLDialect) JSONEachColumnExpr(column string) string {
-	return dbutils.JSONEach(column)
+	return fmt.Sprintf(
+		`JSON_TABLE(CASE WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY' THEN [[%s]] ELSE JSON_ARRAY([[%s]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
+		column, column, column, column,
+	)
 }
 
 // JSONEachParamExpr implements the [jsonEachDialect] interface.
