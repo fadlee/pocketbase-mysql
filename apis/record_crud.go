@@ -80,8 +80,10 @@ func recordsList(e *core.RequestEvent) error {
 	searchProvider := search.NewProvider(fieldsResolver).Query(query)
 
 	// use rowid when available to minimize the need of a covering index with the "id" field
-	if !collection.IsView() && !core.IsMySQLDataDB(e.App) {
-		searchProvider.CountCol("_rowid_")
+	if d, ok := e.App.Dialect().(interface{ CountOverrideColumn(bool) (string, bool) }); ok {
+		if col, override := d.CountOverrideColumn(collection.IsView()); override {
+			searchProvider.CountCol(col)
+		}
 	}
 
 	records := []*core.Record{}

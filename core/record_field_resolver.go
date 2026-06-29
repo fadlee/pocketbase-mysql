@@ -123,6 +123,25 @@ func (r *RecordFieldResolver) LikeColumnContainsExpr(column string) string {
 	return fmt.Sprintf("'%%' || %s || '%%'", column)
 }
 
+// RowidSortExpr implements the rowidSortResolver capability interface
+// by returning a dialect-specific @rowid sort expression.
+//
+// For SQLite it returns the static `[[_rowid_]] {direction}` expression.
+// For MySQL it resolves the "id" field and returns `{resolved} {direction}`.
+func (r *RecordFieldResolver) RowidSortExpr(direction string) (string, error) {
+	if r.app.Dialect().Name() == DialectMySQLName {
+		result, err := r.Resolve("id")
+		if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
+			return "", fmt.Errorf("invalid sort field %q", "@rowid")
+		}
+
+		return fmt.Sprintf("%s %s", result.Identifier, direction), nil
+	}
+
+	// SQLite default
+	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
+}
+
 // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
 func NewRecordFieldResolver(
 	app App,

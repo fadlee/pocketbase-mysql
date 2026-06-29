@@ -118,3 +118,35 @@ func TestIntrospectionDialectMySQL(t *testing.T) {
 				AND LOWER(INDEX_NAME) = LOWER({:indexName})
 			LIMIT 1`, d.IndexOwnerQuery())
 }
+
+func TestCountOverrideColumnSQLite(t *testing.T) {
+	d := core.SQLiteDialect{}
+
+	t.Run("non-view returns _rowid_ override", func(t *testing.T) {
+		col, ok := d.CountOverrideColumn(false)
+		require.True(t, ok)
+		require.Equal(t, "_rowid_", col)
+	})
+
+	t.Run("view returns no override", func(t *testing.T) {
+		col, ok := d.CountOverrideColumn(true)
+		require.False(t, ok)
+		require.Equal(t, "", col)
+	})
+}
+
+func TestCountOverrideColumnMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	t.Run("non-view returns no override", func(t *testing.T) {
+		col, ok := d.CountOverrideColumn(false)
+		require.False(t, ok)
+		require.Equal(t, "", col)
+	})
+
+	t.Run("view returns no override", func(t *testing.T) {
+		col, ok := d.CountOverrideColumn(true)
+		require.False(t, ok)
+		require.Equal(t, "", col)
+	})
+}

@@ -70,6 +70,20 @@ type equalityDialect interface {
 	LikeColumnContainsExpr(column string) string
 }
 
+// rowidDialect is a local (unexported) capability interface that exposes
+// dialect-specific count override column semantics.
+//
+// It is intentionally kept separate from the exported [Dialect] interface so
+// that the public surface stays minimal while the concrete dialect types can
+// still be type-asserted to provide the count override column.
+//
+// CountOverrideColumn returns the column to use for COUNT(DISTINCT ...) queries
+// and a boolean indicating whether an override should be applied. When the
+// boolean is false, the caller should keep the default "id" column.
+type rowidDialect interface {
+	CountOverrideColumn(isView bool) (string, bool)
+}
+
 // SQLiteDialect represents the SQLite data database dialect.
 type SQLiteDialect struct{}
 
@@ -164,6 +178,20 @@ func (SQLiteDialect) LikeEscapeClause() string {
 // LikeColumnContainsExpr implements the [equalityDialect] interface.
 func (SQLiteDialect) LikeColumnContainsExpr(column string) string {
 	return fmt.Sprintf("'%%' || %s || '%%'", column)
+}
+
+// CountOverrideColumn implements the [rowidDialect] interface.
+//
+// SQLite non-view collections can use the builtin _rowid_ column for
+// COUNT(DISTINCT ...) queries to minimize the need of a covering index
+// with the "id" field. Views don't have a _rowid_ column, so no override
+// is provided and the default "id" column is used.
+func (SQLiteDialect) CountOverrideColumn(isView bool) (string, bool) {
+	if isView {
+		return "", false
+	}
+
+	return "_rowid_", true
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -293,6 +321,14 @@ func (MySQLDialect) LikeEscapeClause() string {
 // LikeColumnContainsExpr implements the [equalityDialect] interface.
 func (MySQLDialect) LikeColumnContainsExpr(column string) string {
 	return fmt.Sprintf("CONCAT('%%', %s, '%%')", column)
+}
+
+// CountOverrideColumn implements the [rowidDialect] interface.
+//
+// MySQL doesn't have a _rowid_ column, so no count override is provided
+// and the default "id" column is used for both regular collections and views.
+func (MySQLDialect) CountOverrideColumn(isView bool) (string, bool) {
+	return "", false
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.

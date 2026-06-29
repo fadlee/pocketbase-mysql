@@ -2,7 +2,6 @@ package search
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
@@ -23,6 +22,15 @@ type SortField struct {
 	Direction string `json:"direction"`
 }
 
+// rowidSortResolver is an optional capability interface that resolvers
+// can implement to provide dialect-specific @rowid sort expressions.
+//
+// When a resolver does not implement this interface, the SQLite default
+// (`[[_rowid_]] {direction}`) is used.
+type rowidSortResolver interface {
+	RowidSortExpr(direction string) (string, error)
+}
+
 // BuildExpr resolves the sort field into a valid db sort expression.
 func (s *SortField) BuildExpr(fieldResolver FieldResolver) (string, error) {
 	// special case for random sort
@@ -30,17 +38,13 @@ func (s *SortField) BuildExpr(fieldResolver FieldResolver) (string, error) {
 		return "RANDOM()", nil
 	}
 
-	// special case for the builtin SQLite rowid column
+	// special case for the builtin rowid column
 	if s.Name == rowidSortKey {
-		if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
-			result, err := fieldResolver.Resolve("id")
-			if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
-				return "", fmt.Errorf("invalid sort field %q", s.Name)
-			}
-
-			return fmt.Sprintf("%s %s", result.Identifier, s.Direction), nil
+		if r, ok := fieldResolver.(rowidSortResolver); ok {
+			return r.RowidSortExpr(s.Direction)
 		}
 
+		// SQLite default fallback
 		return fmt.Sprintf("[[_rowid_]] %s", s.Direction), nil
 	}
 

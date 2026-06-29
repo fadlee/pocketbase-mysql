@@ -262,10 +262,23 @@ func (s *Provider) Exec(items any) (*Result, error) {
 		}
 		if expr != "" {
 			// ensure that _rowid_ expressions are always prefixed with the first FROM table
+			//
+			// note: the expr at this point includes the direction suffix
+			// (e.g. "[[_rowid_]] DESC"), so only the column part is prefixed
+			// to avoid producing invalid SQL like "[[demo1.]][[_rowid_]] DESC".
+			// For MySQL, the resolved id expression may already contain a
+			// table prefix (e.g. "[[demo1.id]]"), in which case the
+			// `!strings.Contains(expr, ".")` check correctly skips prefixing.
 			if sortField.Name == rowidSortKey && !strings.Contains(expr, ".") {
 				queryInfo := modelsQuery.Info()
 				if len(queryInfo.From) > 0 {
-					expr = "[[" + inflector.Columnify(queryInfo.From[0]) + "]]." + expr
+					parts := strings.SplitN(expr, " ", 2)
+					prefixed := "[[" + inflector.Columnify(queryInfo.From[0]) + "]]." + parts[0]
+					if len(parts) > 1 {
+						expr = prefixed + " " + parts[1]
+					} else {
+						expr = prefixed
+					}
 				}
 			}
 
