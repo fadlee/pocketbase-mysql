@@ -82,11 +82,45 @@ func (r *RecordFieldResolver) SetAllowHiddenFields(allowHiddenFields bool) {
 }
 
 func (r *RecordFieldResolver) LikeEscapeClause() string {
-	if isMySQLDataDB(r.app) {
-		return " ESCAPE '\\\\'"
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.LikeEscapeClause()
 	}
 
 	return " ESCAPE '\\'"
+}
+
+// EqualityOperators implements the dialect primitive resolver capability
+// by delegating to the app's dialect.
+func (r *RecordFieldResolver) EqualityOperators() search.EqualityOperators {
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.EqualityOperators()
+	}
+
+	// SQLite defaults
+	return search.EqualityOperators{
+		Equal: search.EqualityOperatorSet{
+			EqualOp:     "=",
+			NullEqualOp: "IS",
+			NullConcat:  "OR",
+			NullExpr:    "IS NULL",
+		},
+		NotEqual: search.EqualityOperatorSet{
+			EqualOp:     "IS NOT",
+			NullEqualOp: "IS NOT",
+			NullConcat:  "AND",
+			NullExpr:    "IS NOT NULL",
+		},
+	}
+}
+
+// LikeColumnContainsExpr implements the dialect primitive resolver
+// capability by delegating to the app's dialect.
+func (r *RecordFieldResolver) LikeColumnContainsExpr(column string) string {
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.LikeColumnContainsExpr(column)
+	}
+
+	return fmt.Sprintf("'%%' || %s || '%%'", column)
 }
 
 // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.

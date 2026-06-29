@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"os"
 	"strings"
+
+	"github.com/pocketbase/pocketbase/tools/search"
 )
 
 const (
@@ -53,6 +55,19 @@ type introspectionDialect interface {
 	HasTableQuery() string
 	ViewsQuery() string
 	IndexOwnerQuery() string
+}
+
+// equalityDialect is a local (unexported) capability interface that exposes
+// dialect-specific SQL primitives for equality (=, !=) and LIKE expression
+// building used by the search filter package.
+//
+// It is intentionally kept separate from the exported [Dialect] interface so
+// that the public surface stays minimal while the concrete dialect types can
+// still be type-asserted to provide search primitives.
+type equalityDialect interface {
+	EqualityOperators() search.EqualityOperators
+	LikeEscapeClause() string
+	LikeColumnContainsExpr(column string) string
 }
 
 // SQLiteDialect represents the SQLite data database dialect.
@@ -121,6 +136,34 @@ func (SQLiteDialect) ViewsQuery() string {
 // IndexOwnerQuery implements the [introspectionDialect] interface.
 func (SQLiteDialect) IndexOwnerQuery() string {
 	return "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND LOWER(tbl_name) != LOWER({:oldName}) AND LOWER(tbl_name) != LOWER({:newName}) AND LOWER(name) = LOWER({:indexName}) LIMIT 1"
+}
+
+// EqualityOperators implements the [equalityDialect] interface.
+func (SQLiteDialect) EqualityOperators() search.EqualityOperators {
+	return search.EqualityOperators{
+		Equal: search.EqualityOperatorSet{
+			EqualOp:     "=",
+			NullEqualOp: "IS",
+			NullConcat:  "OR",
+			NullExpr:    "IS NULL",
+		},
+		NotEqual: search.EqualityOperatorSet{
+			EqualOp:     "IS NOT",
+			NullEqualOp: "IS NOT",
+			NullConcat:  "AND",
+			NullExpr:    "IS NOT NULL",
+		},
+	}
+}
+
+// LikeEscapeClause implements the [equalityDialect] interface.
+func (SQLiteDialect) LikeEscapeClause() string {
+	return " ESCAPE '\\'"
+}
+
+// LikeColumnContainsExpr implements the [equalityDialect] interface.
+func (SQLiteDialect) LikeColumnContainsExpr(column string) string {
+	return fmt.Sprintf("'%%' || %s || '%%'", column)
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -218,6 +261,38 @@ func (MySQLDialect) IndexOwnerQuery() string {
 				AND LOWER(TABLE_NAME) != LOWER({:newName})
 				AND LOWER(INDEX_NAME) = LOWER({:indexName})
 			LIMIT 1`
+}
+
+// EqualityOperators implements the [equalityDialect] interface.
+//
+// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
+// `IS NOT TRUE`, etc.), so `<>` is used for value comparisons while keeping
+// `IS NOT NULL` for the null check which works in both drivers.
+func (MySQLDialect) EqualityOperators() search.EqualityOperators {
+	return search.EqualityOperators{
+		Equal: search.EqualityOperatorSet{
+			EqualOp:     "=",
+			NullEqualOp: "IS",
+			NullConcat:  "OR",
+			NullExpr:    "IS NULL",
+		},
+		NotEqual: search.EqualityOperatorSet{
+			EqualOp:     "<>",
+			NullEqualOp: "<>",
+			NullConcat:  "AND",
+			NullExpr:    "IS NOT NULL",
+		},
+	}
+}
+
+// LikeEscapeClause implements the [equalityDialect] interface.
+func (MySQLDialect) LikeEscapeClause() string {
+	return " ESCAPE '\\\\'"
+}
+
+// LikeColumnContainsExpr implements the [equalityDialect] interface.
+func (MySQLDialect) LikeColumnContainsExpr(column string) string {
+	return fmt.Sprintf("CONCAT('%%', %s, '%%')", column)
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.
