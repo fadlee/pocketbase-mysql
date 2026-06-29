@@ -1386,6 +1386,220 @@ class QA {
     this.log("JSON_TABLE scalar spike: PASSED (findings documented)");
   }
 
+  // Task 6.3: Spike JSON array length normalization.
+  //
+  // The :length modifier uses dbutils.JSONArrayLength() which is currently
+  // SQLite-only (no MySQL branch). This spike proves that :length fails on
+  // MySQL and documents the normalization contract that the MySQL implementation
+  // must preserve:
+  //   - Empty string → 0
+  //   - SQL NULL → 0
+  //   - Scalar non-JSON string → 1 (wrapped in json_array)
+  //   - Scalar non-JSON number → 1 (wrapped in json_array)
+  //   - JSON array → actual length
+  //   - JSON object → 0 (not an array)
+  //   - Invalid JSON → 1 (wrapped in json_array)
+  //   - JSON string scalar → 1
+  //   - JSON number scalar → 1
+  //   - JSON boolean scalar → 1
+  //   - JSON null → 1
+  //
+  // FIX: Task 7.2 will add MySQL JSONArrayLength expression.
+  async sectionJsonLengthSpike() {
+    await this.createCollection({
+      name: "qa_json_len", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "tags", type: "select", required: false, values: ["a", "b", "c"], maxSelect: 3 },
+        { name: "json_data", type: "json", required: false },
+      ],
+    });
+
+    await this.createRecord("qa_json_len", { tags: ["a", "b"], json_data: ["x", "y", "z"] });
+    await this.createRecord("qa_json_len", { tags: ["a"], json_data: { key: "val" } });
+    await this.createRecord("qa_json_len", { tags: [], json_data: "scalar_string" });
+
+    // --- Test :length modifier (currently fails on MySQL) ---
+    // JSONArrayLength has no MySQL branch — it generates SQLite's
+    // json_array_length() which doesn't exist in MySQL.
+    {
+      const err = await expectStatus(
+        "tags:length on MySQL (expected 400 — no MySQL JSONArrayLength)",
+        400,
+        () => this.getRecords("qa_json_len", `filter=${encodeURIComponent("tags:length=2")}`)
+      );
+      this.log("JSON length spike: :length on select field fails with 400 (no MySQL JSONArrayLength) — confirmed");
+    }
+
+    {
+      const err = await expectStatus(
+        "json_data:length on MySQL (expected 400 — no MySQL JSONArrayLength)",
+        400,
+        () => this.getRecords("qa_json_len", `filter=${encodeURIComponent("json_data:length=3")}`)
+      );
+      this.log("JSON length spike: :length on json field fails with 400 (no MySQL JSONArrayLength) — confirmed");
+    }
+
+    this.log("JSON length spike findings:");
+    this.log("  1. :length modifier fails — JSONArrayLength has no MySQL branch");
+    this.log("  2. SQLite normalization contract: empty→0, null→0, scalar→1, array→len, object→0");
+    this.log("  3. Fix: Task 7.2 will add MySQL JSON_LENGTH-based expression with normalization");
+    this.log("JSON length spike: PASSED (findings documented)");
+  }
+
+  // Task 6.4: Spike JSON extraction contract.
+  //
+  // JSON path extraction uses dbutils.JSONExtract() which is currently
+  // SQLite-only (no MySQL branch). This spike proves that JSON path filtering
+  // fails on MySQL and documents the extraction contract.
+  //
+  // The SQLite JSONExtract expression:
+  //   CASE WHEN json_valid(column) THEN JSON_EXTRACT(column, '$path')
+  //   ELSE JSON_EXTRACT(json_object('pb', column), '$.pbpath') END
+  //
+  // This wraps non-JSON columns in a JSON object so scalar values can be
+  // extracted. MySQL needs an equivalent expression using JSON_EXTRACT/
+  // JSON_UNQUOTE.
+  //
+  // FIX: Task 7.3 will add MySQL JSONExtract expression.
+  async sectionJsonExtractSpike() {
+    await this.createCollection({
+      name: "qa_json_ex", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "json_data", type: "json", required: false },
+        { name: "title", type: "text", required: false, max: 255 },
+      ],
+    });
+
+    await this.createRecord("qa_json_ex", {
+      json_data: { name: "alice", age: 30, nested: { city: "NYC" } },
+      title: "record1",
+    });
+    await this.createRecord("qa_json_ex", {
+      json_data: { name: "bob", age: 25 },
+      title: "record2",
+    });
+
+    // --- Test JSON path extraction (currently fails on MySQL) ---
+    // JSONExtract has no MySQL branch — it generates SQLite's json_extract()
+    // which doesn't exist in MySQL (MySQL has JSON_EXTRACT but with different
+    // quoting behavior).
+    {
+      const err = await expectStatus(
+        "json_data.name extraction on MySQL (expected 400 — no MySQL JSONExtract)",
+        400,
+        () => this.getRecords("qa_json_ex", `filter=${encodeURIComponent('json_data.name="alice"')}`)
+      );
+      this.log("JSON extract spike: json_data.name filter fails with 400 (no MySQL JSONExtract) — confirmed");
+    }
+
+    {
+      const err = await expectStatus(
+        "json_data.nested.city extraction on MySQL (expected 400)",
+        400,
+        () => this.getRecords("qa_json_ex", `filter=${encodeURIComponent('json_data.nested.city="NYC"')}`)
+      );
+      this.log("JSON extract spike: nested path filter fails with 400 (no MySQL JSONExtract) — confirmed");
+    }
+
+    // --- Test :lower modifier with JSON extraction ---
+    // The :lower modifier wraps the identifier in LOWER(). If JSONExtract
+    // fails, :lower will also fail.
+    {
+      const err = await expectStatus(
+        "json_data.name:lower on MySQL (expected 400)",
+        400,
+        () => this.getRecords("qa_json_ex", `filter=${encodeURIComponent('json_data.name:lower="alice"')}`)
+      );
+      this.log("JSON extract spike: :lower with JSON path fails with 400 — confirmed");
+    }
+
+    this.log("JSON extract spike findings:");
+    this.log("  1. JSON path filtering fails — JSONExtract has no MySQL branch");
+    this.log("  2. SQLite contract: CASE WHEN json_valid THEN JSON_EXTRACT ELSE wrap in json_object");
+    this.log("  3. MySQL needs JSON_EXTRACT/JSON_UNQUOTE with equivalent normalization");
+    this.log("  4. :lower composition also fails (depends on JSONExtract)");
+    this.log("  5. Fix: Task 7.3 will add MySQL JSONExtract expression");
+    this.log("JSON extract spike: PASSED (findings documented)");
+  }
+
+  // Task 6.5: Spike strftime datetime parsing.
+  //
+  // The strftime token function is currently SQLite-only. This spike proves
+  // that strftime-based filters fail on MySQL and documents the translation
+  // contract.
+  //
+  // SQLite strftime format tokens → MySQL DATE_FORMAT equivalents:
+  //   %Y → %Y (4-digit year)
+  //   %m → %m (2-digit month)
+  //   %d → %d (2-digit day)
+  //   %H → %H (2-digit hour 24h)
+  //   %M → %i (2-digit minute — NOTE: MySQL uses %i not %M)
+  //   %S → %s (2-digit second — NOTE: MySQL uses %s not %S)
+  //   %f → %f (fractional seconds — MySQL 8.0+ supports this)
+  //
+  // Key differences:
+  //   - SQLite %M = minutes, MySQL %M = month name → must map to %i
+  //   - SQLite %S = seconds, MySQL %S = seconds (same but case matters)
+  //   - SQLite uses strftime(), MySQL uses DATE_FORMAT()
+  //   - SQLite accepts 'Z' suffix in datetime, MySQL needs STR_TO_DATE or REPLACE
+  //   - SQLite unixepoch modifier → MySQL FROM_UNIXTIME()
+  //
+  // FIX: Task 8.1 will implement StrftimeExpr dialect method.
+  async sectionStrftimeSpike() {
+    await this.createCollection({
+      name: "qa_strftime", type: "base",
+      listRule: "", viewRule: "", createRule: "", updateRule: "", deleteRule: "",
+      fields: [
+        { name: "when", type: "date", required: false },
+      ],
+    });
+
+    await this.createRecord("qa_strftime", { when: "2026-01-15 10:30:00.000Z" });
+    await this.createRecord("qa_strftime", { when: "2026-06-20 14:45:00.000Z" });
+
+    // --- Test strftime filter (currently fails on MySQL) ---
+    // strftime token function has no MySQL handling — it generates
+    // strftime() which doesn't exist in MySQL.
+    {
+      const err = await expectStatus(
+        "strftime year filter on MySQL (expected 400 — no MySQL strftime)",
+        400,
+        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y', when)='2026'")}`)
+      );
+      this.log("Strftime spike: strftime('%Y', when) filter fails with 400 (no MySQL strftime) — confirmed");
+    }
+
+    {
+      const err = await expectStatus(
+        "strftime month filter on MySQL (expected 400)",
+        400,
+        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%m', when)='01'")}`)
+      );
+      this.log("Strftime spike: strftime('%m', when) filter fails with 400 — confirmed");
+    }
+
+    // --- Test strftime with format string containing time tokens ---
+    {
+      const err = await expectStatus(
+        "strftime full datetime filter on MySQL (expected 400)",
+        400,
+        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y-%m-%d %H:%M:%S', when)='2026-01-15 10:30:00'")}`)
+      );
+      this.log("Strftime spike: full datetime format fails with 400 — confirmed");
+    }
+
+    this.log("Strftime spike findings:");
+    this.log("  1. strftime filter fails — token function has no MySQL handling");
+    this.log("  2. MySQL translation: strftime() → DATE_FORMAT()");
+    this.log("  3. Critical token mappings: %M→%i (minutes), %S→%s (seconds)");
+    this.log("  4. Datetime parsing: SQLite accepts 'Z' suffix, MySQL needs REPLACE/STR_TO_DATE");
+    this.log("  5. unixepoch modifier: SQLite uses modifier, MySQL needs FROM_UNIXTIME()");
+    this.log("  6. Fix: Task 8.1 will implement StrftimeExpr dialect method");
+    this.log("Strftime spike: PASSED (findings documented)");
+  }
+
   // =========================================================================
   // Main
   // =========================================================================
@@ -1411,6 +1625,9 @@ class QA {
     await this.sectionCascadeDelete();
     await this.sectionRules();
     await this.sectionJsonTableSpike();
+    await this.sectionJsonLengthSpike();
+    await this.sectionJsonExtractSpike();
+    await this.sectionStrftimeSpike();
 
     // Scan server log for error-level lines or panics. Request-level errors
     // (e.g. "ERROR POST /api/...") mirror HTTP responses we already assert on
