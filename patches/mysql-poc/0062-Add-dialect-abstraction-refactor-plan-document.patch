@@ -1,7 +1,7 @@
 From 77a1a6a1f3dcc157c8baf9f6c495b8a8828872ce Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 03:14:38 +0700
-Subject: [PATCH 62/91] Add dialect abstraction refactor plan document
+Subject: [PATCH 62/93] Add dialect abstraction refactor plan document
 
 ---
  docs/dialect-refactor-plan.md | 248 ++++++++++++++++++++++++++++++++++

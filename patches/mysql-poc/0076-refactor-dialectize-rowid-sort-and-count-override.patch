@@ -1,7 +1,7 @@
 From c24e01f14616e5230423c74fb0aeb8f8f7ad2f98 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 11:38:13 +0700
-Subject: [PATCH 76/91] refactor: dialectize rowid sort and count override
+Subject: [PATCH 76/93] refactor: dialectize rowid sort and count override
 
 ---
  apis/record_crud.go           |   6 +-

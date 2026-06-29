@@ -1,7 +1,7 @@
 From 42cab565c67c3e455e6fcc481977b4cad671d39e Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 13:34:25 +0700
-Subject: [PATCH 87/91] refactor: route collection query SQL through dialect
+Subject: [PATCH 87/93] refactor: route collection query SQL through dialect
 
 ---
  core/collection_query.go | 32 ++++++++-------

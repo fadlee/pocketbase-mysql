@@ -1,7 +1,7 @@
 From 96f1a5b074b84f86ad58f3e2b922da548f80f3e2 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 11:52:49 +0700
-Subject: [PATCH 77/91] refactor: support raw dialect join expressions
+Subject: [PATCH 77/93] refactor: support raw dialect join expressions
 
 ---
  core/record_field_resolver.go               |  25 +++++

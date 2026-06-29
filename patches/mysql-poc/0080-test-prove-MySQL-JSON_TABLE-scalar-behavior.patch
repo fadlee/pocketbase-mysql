@@ -1,7 +1,7 @@
 From 6d719a03dba18051cd76b18c1f658f5177f585cc Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 12:09:14 +0700
-Subject: [PATCH 80/91] test: prove MySQL JSON_TABLE scalar behavior
+Subject: [PATCH 80/93] test: prove MySQL JSON_TABLE scalar behavior
 
 ---
  scripts/mysql-runtime-qa.mjs | 97 ++++++++++++++++++++++++++++++++++++

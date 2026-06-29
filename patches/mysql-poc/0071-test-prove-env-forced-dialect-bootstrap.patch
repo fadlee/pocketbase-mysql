@@ -1,7 +1,7 @@
 From 7af8d21bc2458b22f1481c4d3af20ae9ea4b89ee Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 10:39:05 +0700
-Subject: [PATCH 71/91] test: prove env-forced dialect bootstrap
+Subject: [PATCH 71/93] test: prove env-forced dialect bootstrap
 
 ---
  core/db_dialect_test.go | 25 +++++++++++++++++++++++++
