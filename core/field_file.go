@@ -191,15 +191,13 @@ func (f *FileField) IsMultiple() bool {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *FileField) ColumnType(app App) string {
+	cd := app.Dialect().(columnDialect)
+
 	if f.IsMultiple() {
-		return jsonArrayColumnType(app)
+		return cd.JSONArrayColumnType()
 	}
 
-	if isMySQLDataDB(app) {
-		return "VARCHAR(255) DEFAULT '' NOT NULL"
-	}
-
-	return "TEXT DEFAULT '' NOT NULL"
+	return cd.VarCharColumnType(255)
 }
 
 // PrepareValue implements [Field.PrepareValue] interface method.

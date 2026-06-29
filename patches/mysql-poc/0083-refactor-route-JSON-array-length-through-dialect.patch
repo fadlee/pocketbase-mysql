@@ -1,0 +1,238 @@
+From 819d1fd1adf0105ddfbc56599282fbbddebc650f Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 12:37:07 +0700
+Subject: [PATCH 83/93] refactor: route JSON array length through dialect
+
+---
+ core/db_dialect.go                   | 39 +++++++++++++++++
+ core/record_field_resolver.go        | 10 +++++
+ core/record_field_resolver_runner.go | 19 ++++++++-
+ scripts/mysql-runtime-qa.mjs         | 63 ++++++++++++++++++----------
+ 4 files changed, 108 insertions(+), 23 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 7f1a4e97..5f162c23 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -109,6 +109,26 @@ type jsonEachDialect interface {
+ 	JSONEachOnClause() dbx.Expression
+ }
+ 
++// jsonLengthDialect is a local (unexported) capability interface that
++// exposes dialect-specific JSON array length expression generation.
++//
++// It is intentionally kept separate from the exported [Dialect] interface
++// so that the public surface stays minimal while the concrete dialect types
++// can be type-asserted to provide JSON array length expressions.
++type jsonLengthDialect interface {
++	// JSONArrayLengthExpr returns a SQL expression that computes the length
++	// of a JSON array column with normalization for non-array values.
++	//
++	// For SQLite: json_array_length(CASE WHEN ... END)
++	// For MySQL: JSON_LENGTH(CASE WHEN ... END)
++	//
++	// The expression must return:
++	//   - array length for JSON arrays
++	//   - 0 for empty string or SQL NULL
++	//   - 1 for scalar values (JSON or non-JSON)
++	JSONArrayLengthExpr(column string) string
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -236,6 +256,11 @@ func (SQLiteDialect) JSONEachOnClause() dbx.Expression {
+ 	return nil
+ }
+ 
++// JSONArrayLengthExpr implements the [jsonLengthDialect] interface.
++func (SQLiteDialect) JSONArrayLengthExpr(column string) string {
++	return dbutils.JSONArrayLength(column)
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -392,6 +417,20 @@ func (MySQLDialect) JSONEachOnClause() dbx.Expression {
+ 	return dbx.NewExp("1=1")
+ }
+ 
++// JSONArrayLengthExpr implements the [jsonLengthDialect] interface.
++//
++// MySQL doesn't have json_array_length() or iif(), so JSON_LENGTH() and
++// IF() are used to mirror the SQLite normalization contract:
++//   - JSON array → array length
++//   - empty string or SQL NULL → 0
++//   - scalar values (JSON or non-JSON) → 1
++func (MySQLDialect) JSONArrayLengthExpr(column string) string {
++	return fmt.Sprintf(
++		`JSON_LENGTH(CASE WHEN IF(JSON_VALID([[%s]]), JSON_TYPE([[%s]]) = 'ARRAY', FALSE) THEN [[%s]] ELSE (CASE WHEN [[%s]] = '' OR [[%s]] IS NULL THEN JSON_ARRAY() ELSE JSON_ARRAY([[%s]]) END) END)`,
++		column, column, column, column, column, column,
++	)
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index 0facf9b1..6e4cac18 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -528,6 +528,16 @@ func (r *RecordFieldResolver) jsonEachDialectIfAvailable() jsonEachDialect {
+ 	return nil
+ }
+ 
++// jsonLengthDialectIfAvailable returns the jsonLengthDialect capability if
++// the configured dialect implements it, or nil otherwise (e.g. in tests
++// without a real dialect).
++func (r *RecordFieldResolver) jsonLengthDialectIfAvailable() jsonLengthDialect {
++	if d, ok := r.app.Dialect().(jsonLengthDialect); ok {
++		return d
++	}
++	return nil
++}
++
+ func (r *RecordFieldResolver) registerRuleJoin(collection *Collection, tableAlias string) {
+ 	// replace existing
+ 	for i, j := range r.listRuleJoins {
+diff --git a/core/record_field_resolver_runner.go b/core/record_field_resolver_runner.go
+index f32ba07e..573d7950 100644
+--- a/core/record_field_resolver_runner.go
++++ b/core/record_field_resolver_runner.go
+@@ -835,13 +835,28 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
+ 	if modifier == lengthModifier && isMultivaluer {
+ 		jePair := r.activeTableAlias + "." + cleanFieldName
+ 
++		var lengthExpr string
++		if d := r.resolver.jsonLengthDialectIfAvailable(); d != nil {
++			lengthExpr = d.JSONArrayLengthExpr(jePair)
++		} else {
++			lengthExpr = dbutils.JSONArrayLength(jePair)
++		}
++
+ 		result := &search.ResolverResult{
+-			Identifier: dbutils.JSONArrayLength(jePair),
++			Identifier: lengthExpr,
+ 		}
+ 
+ 		if r.withMultiMatch {
+ 			jePair2 := r.multiMatchActiveTableAlias + "." + cleanFieldName
+-			r.multiMatch.ValueIdentifier = dbutils.JSONArrayLength(jePair2)
++
++			var lengthExpr2 string
++			if d := r.resolver.jsonLengthDialectIfAvailable(); d != nil {
++				lengthExpr2 = d.JSONArrayLengthExpr(jePair2)
++			} else {
++				lengthExpr2 = dbutils.JSONArrayLength(jePair2)
++			}
++
++			r.multiMatch.ValueIdentifier = lengthExpr2
+ 			result.MultiMatchSubQuery = r.multiMatch
+ 		}
+ 
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index 7e172ad9..7eb65fe8 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -1383,23 +1383,23 @@ class QA {
+ 
+   // Task 6.3: Spike JSON array length normalization.
+   //
+-  // The :length modifier uses dbutils.JSONArrayLength() which is currently
+-  // SQLite-only (no MySQL branch). This spike proves that :length fails on
+-  // MySQL and documents the normalization contract that the MySQL implementation
+-  // must preserve:
++  // The :length modifier now uses the jsonLengthDialect capability interface
++  // (JSONArrayLengthExpr) which generates dialect-appropriate expressions.
++  // This spike verifies that :length works on MySQL and that the
++  // normalization contract is preserved:
+   //   - Empty string → 0
+   //   - SQL NULL → 0
+   //   - Scalar non-JSON string → 1 (wrapped in json_array)
+   //   - Scalar non-JSON number → 1 (wrapped in json_array)
+   //   - JSON array → actual length
+-  //   - JSON object → 0 (not an array)
++  //   - JSON object → 1 (not an array, wrapped in json_array(col))
+   //   - Invalid JSON → 1 (wrapped in json_array)
+   //   - JSON string scalar → 1
+   //   - JSON number scalar → 1
+   //   - JSON boolean scalar → 1
+   //   - JSON null → 1
+   //
+-  // FIX: Task 7.2 will add MySQL JSONArrayLength expression.
++  // Task 7.2: MySQL JSONArrayLength expression added via jsonLengthDialect.
+   async sectionJsonLengthSpike() {
+     await this.createCollection({
+       name: "qa_json_len", type: "base",
+@@ -1414,32 +1414,53 @@ class QA {
+     await this.createRecord("qa_json_len", { tags: ["a"], json_data: { key: "val" } });
+     await this.createRecord("qa_json_len", { tags: [], json_data: "scalar_string" });
+ 
+-    // --- Test :length modifier (currently fails on MySQL) ---
+-    // JSONArrayLength has no MySQL branch — it generates SQLite's
+-    // json_array_length() which doesn't exist in MySQL.
++    // --- Test :length modifier (now works on MySQL for MultiValuer fields) ---
++    // Note: :length only applies to MultiValuer fields (select, relation, file).
++    // JsonField does NOT implement MultiValuer, so :length on json fields falls
++    // through to the default handler which uses JSONExtract (still SQLite-only,
++    // Task 7.3).
+     {
+-      const err = await expectStatus(
+-        "tags:length on MySQL (expected 400 — no MySQL JSONArrayLength)",
+-        400,
+-        () => this.getRecords("qa_json_len", `filter=${encodeURIComponent("tags:length=2")}`)
+-      );
+-      this.log("JSON length spike: :length on select field fails with 400 (no MySQL JSONArrayLength) — confirmed");
++      const res = await this.getRecords("qa_json_len", `filter=${encodeURIComponent("tags:length=2")}`);
++      const items = res.items || res;
++      this.assert(items.length === 1, `expected 1 record with tags:length=2, got ${items.length}`);
++      this.assert(items[0].tags.length === 2, `expected 2 tags, got ${items[0].tags.length}`);
++      this.log("JSON length spike: :length on select field works — returns record with 2 tags");
++    }
++
++    {
++      const res = await this.getRecords("qa_json_len", `filter=${encodeURIComponent("tags:length=1")}`);
++      const items = res.items || res;
++      this.assert(items.length === 1, `expected 1 record with tags:length=1, got ${items.length}`);
++      this.assert(items[0].tags.length === 1, `expected 1 tag, got ${items[0].tags.length}`);
++      this.log("JSON length spike: :length=1 on select field works — returns record with 1 tag");
++    }
++
++    // Test empty array length = 0
++    {
++      const res = await this.getRecords("qa_json_len", `filter=${encodeURIComponent("tags:length=0")}`);
++      const items = res.items || res;
++      this.assert(items.length === 1, `expected 1 record with tags:length=0, got ${items.length}`);
++      this.assert(items[0].tags.length === 0, `expected 0 tags, got ${items[0].tags.length}`);
++      this.log("JSON length spike: :length=0 on empty array works — returns record with 0 tags");
+     }
+ 
++    // json_data:length still fails because JsonField is not a MultiValuer —
++    // :length falls through to the default handler which uses JSONExtract
++    // (SQLite-only, Task 7.3).
+     {
+       const err = await expectStatus(
+-        "json_data:length on MySQL (expected 400 — no MySQL JSONArrayLength)",
++        "json_data:length on MySQL (expected 400 — JSONExtract is SQLite-only, Task 7.3)",
+         400,
+         () => this.getRecords("qa_json_len", `filter=${encodeURIComponent("json_data:length=3")}`)
+       );
+-      this.log("JSON length spike: :length on json field fails with 400 (no MySQL JSONArrayLength) — confirmed");
++      this.log("JSON length spike: :length on json field still fails with 400 (JSONExtract, not JSONArrayLength) — expected");
+     }
+ 
+     this.log("JSON length spike findings:");
+-    this.log("  1. :length modifier fails — JSONArrayLength has no MySQL branch");
+-    this.log("  2. SQLite normalization contract: empty→0, null→0, scalar→1, array→len, object→0");
+-    this.log("  3. Fix: Task 7.2 will add MySQL JSON_LENGTH-based expression with normalization");
+-    this.log("JSON length spike: PASSED (findings documented)");
++    this.log("  1. :length modifier works on MultiValuer fields — JSONArrayLengthExpr generates MySQL JSON_LENGTH expression");
++    this.log("  2. Normalization preserved: empty→0, null→0, scalar→1, array→len, object→1");
++    this.log("  3. :length on json fields falls through to JSONExtract (Task 7.3), not JSONArrayLength");
++    this.log("JSON length spike: PASSED (:length works on MySQL for MultiValuer fields)");
+   }
+ 
+   // Task 6.4: Spike JSON extraction contract.
+-- 
+2.54.0.windows.1
+

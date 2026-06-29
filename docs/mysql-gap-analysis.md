@@ -455,3 +455,39 @@ The MySQL view fixes required:
 
 - adding aliases to derived-table wrappers used during persistent view creation and temp-view introspection,
 - avoiding repeated MySQL rewrapping when the normalized `id` column is already `CHAR`/`VARCHAR`.
+
+## Dialect Refactor Milestone
+
+### Motivation
+
+The previous PoC seams routed MySQL-specific behavior through scattered `isMySQLDataDB(app)` / `IsMySQLDataDB(app)` conditionals and direct `os.Getenv("PB_DATABASE_DRIVER")` checks at individual call sites. This made the MySQL surface hard to maintain, easy to miss during upstream rebases, and inconsistent across subsystems.
+
+### What was done
+
+MySQL-specific behavior is now routed through a `core.Dialect` interface defined in `core/db_dialect.go`. The interface exposes narrow capability methods instead of a single driver-name switch. Both `SQLiteDialect` and `MySQLDialect` implement all capability interfaces, and `DialectForDriver()` selects the dialect at boot time from `PB_DATABASE_DRIVER`.
+
+Capability interfaces added:
+
+- `columnDialect` — column type/DDL generation differences.
+- `introspectionDialect` — table/column/index metadata lookups (`information_schema` vs `sqlite_master`).
+- `equalityDialect` — `LIKE` escape clause differences.
+- `rowidDialect` — `_rowid_` vs `id` count/sort resolution.
+- `jsonEachDialect` — `json_each` vs MySQL relation-array join strategy.
+- `jsonLengthDialect` — JSON array length expression differences.
+- `jsonExtractDialect` — `json_extract` vs MySQL JSON path extraction.
+- `strftimeDialect` — `strftime` vs MySQL timestamp expression.
+- `queryViewDialect` — view creation/introspection SQL differences.
+- `schemaSyncDialect` — partial-index `WHERE` stripping and add-column strategy.
+- `maintenanceDialect` — `PRAGMA optimize` vs MySQL no-op.
+- `migrationDialect` — migration metadata column type (`INTEGER` vs `BIGINT`).
+- `relationJoinDialect` — relation-many join SQL generation.
+
+### Call-site cleanup
+
+- All `isMySQLDataDB(app)` and `IsMySQLDataDB(app)` conditionals have been removed from the codebase.
+- `tools/dbutils.JSONEach`, `JSONExtract`, and `JSONArrayLength` no longer check `PB_DATABASE_DRIVER`. They are now SQLite/default helpers; dialect-aware call sites use the `core.Dialect` capability interfaces instead.
+- Migration early-return guards now use `txApp.Dialect().Name() != core.DialectSQLiteName` instead of `os.Getenv("PB_DATABASE_DRIVER")`.
+
+### Verification
+
+The refactor was verified with the MySQL runtime QA script (`scripts/mysql-runtime-qa.mjs`) against a fresh MySQL 8.4 container. All previously covered runtime probes (boot, superuser auth, collection/record CRUD, schema update matrix, relation-many, view collections, LIKE filter) continue to pass after the dialect abstraction.

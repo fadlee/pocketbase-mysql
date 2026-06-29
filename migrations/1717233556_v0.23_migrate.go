@@ -20,7 +20,7 @@ import (
 
 func init() {
 	core.SystemMigrations.Register(func(txApp core.App) error {
-		if isMySQLDataDB(txApp) {
+		if txApp.Dialect().Name() != core.DialectSQLiteName {
 			return nil
 		}
 		// note: mfas and authOrigins tables are available only with v0.23

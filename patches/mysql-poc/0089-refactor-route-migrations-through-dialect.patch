@@ -1,0 +1,444 @@
+From af0777b6feaf9e39b380525fdbeada076aa440cf Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 14:03:55 +0700
+Subject: [PATCH 89/93] refactor: route migrations through dialect
+
+---
+ core/db_dialect.go                         | 133 +++++++++++++++++++++
+ core/db_dialect_test.go                    |  52 ++++++++
+ core/migrations_runner.go                  |   6 +-
+ migrations/1640988000_init.go              |  76 +-----------
+ migrations/1717233556_v0.23_migrate.go     |   2 +-
+ migrations/1717233557_v0.23_migrate2.go    |   2 +-
+ migrations/1717233558_v0.23_migrate3.go    |   2 +-
+ migrations/1717233559_v0.23_migrate4.go    |   2 +-
+ migrations/1778828400_normalize_indexes.go |   3 +-
+ 9 files changed, 193 insertions(+), 85 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 23d32d20..99f3ec07 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -283,6 +283,27 @@ type maintenanceDialect interface {
+ 	Checkpoint(db dbx.Builder, logger *slog.Logger)
+ }
+ 
++// migrationDialect is a local (unexported) capability interface that
++// exposes dialect-specific system migration SQL.
++//
++// It is intentionally kept separate from the exported [Dialect] interface
++// so that the public surface stays minimal.
++type migrationDialect interface {
++	// CollectionsTableDDL returns the complete DDL for the _collections
++	// system table, including any index creation statements.
++	CollectionsTableDDL() string
++
++	// ParamsTableDDL returns the complete DDL for the _params system table.
++	ParamsTableDDL() string
++
++	// MigrationAppliedColumnType returns the SQL column type for the
++	// _migrations.applied column.
++	//
++	// For SQLite: "INTEGER"
++	// For MySQL: "BIGINT"
++	MigrationAppliedColumnType() string
++}
++
+ // queryViewDialectIfAvailable returns the queryViewDialect capability if
+ // the provided dialect implements it, or nil otherwise.
+ func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
+@@ -577,6 +598,47 @@ func (SQLiteDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
+ 	_, _ = db.NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+ }
+ 
++// CollectionsTableDDL implements the [migrationDialect] interface.
++func (SQLiteDialect) CollectionsTableDDL() string {
++	return `
++		CREATE TABLE IF NOT EXISTS {{_collections}} (
++			[[id]]         TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
++			[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
++			[[type]]       TEXT DEFAULT "base" NOT NULL,
++			[[name]]       TEXT UNIQUE NOT NULL,
++			[[fields]]     JSON DEFAULT "[]" NOT NULL,
++			[[indexes]]    JSON DEFAULT "[]" NOT NULL,
++			[[listRule]]   TEXT DEFAULT NULL,
++			[[viewRule]]   TEXT DEFAULT NULL,
++			[[createRule]] TEXT DEFAULT NULL,
++			[[updateRule]] TEXT DEFAULT NULL,
++			[[deleteRule]] TEXT DEFAULT NULL,
++			[[options]]    JSON DEFAULT "{}" NOT NULL,
++			[[created]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
++			[[updated]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
++		);
++
++		CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);
++	`
++}
++
++// ParamsTableDDL implements the [migrationDialect] interface.
++func (SQLiteDialect) ParamsTableDDL() string {
++	return `
++		CREATE TABLE IF NOT EXISTS {{_params}} (
++			[[id]]      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
++			[[value]]   JSON DEFAULT NULL,
++			[[created]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
++			[[updated]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
++		);
++	`
++}
++
++// MigrationAppliedColumnType implements the [migrationDialect] interface.
++func (SQLiteDialect) MigrationAppliedColumnType() string {
++	return "INTEGER"
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -956,6 +1018,47 @@ func (MySQLDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
+ 	// no-op
+ }
+ 
++// CollectionsTableDDL implements the [migrationDialect] interface.
++func (MySQLDialect) CollectionsTableDDL() string {
++	return `
++		CREATE TABLE {{_collections}} (
++			[[id]]         VARCHAR(15) PRIMARY KEY NOT NULL,
++			[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
++			[[type]]       VARCHAR(255) DEFAULT "base" NOT NULL,
++			[[name]]       VARCHAR(255) UNIQUE NOT NULL,
++			[[fields]]     JSON NOT NULL,
++			[[indexes]]    JSON NOT NULL,
++			[[listRule]]   TEXT DEFAULT NULL,
++			[[viewRule]]   TEXT DEFAULT NULL,
++			[[createRule]] TEXT DEFAULT NULL,
++			[[updateRule]] TEXT DEFAULT NULL,
++			[[deleteRule]] TEXT DEFAULT NULL,
++			[[options]]    JSON NOT NULL,
++			[[created]]    VARCHAR(255) DEFAULT "" NOT NULL,
++			[[updated]]    VARCHAR(255) DEFAULT "" NOT NULL
++		);
++
++		CREATE INDEX idx__collections_type on {{_collections}} ([[type]]);
++	`
++}
++
++// ParamsTableDDL implements the [migrationDialect] interface.
++func (MySQLDialect) ParamsTableDDL() string {
++	return `
++		CREATE TABLE {{_params}} (
++			[[id]]      VARCHAR(15) PRIMARY KEY NOT NULL,
++			[[value]]   JSON DEFAULT NULL,
++			[[created]] VARCHAR(255) DEFAULT "" NOT NULL,
++			[[updated]] VARCHAR(255) DEFAULT "" NOT NULL
++		);
++	`
++}
++
++// MigrationAppliedColumnType implements the [migrationDialect] interface.
++func (MySQLDialect) MigrationAppliedColumnType() string {
++	return "BIGINT"
++}
++
+ // translateStrftimeFormat converts SQLite strftime format tokens to MySQL
+ // DATE_FORMAT tokens.
+ //
+@@ -1029,3 +1132,33 @@ func IsMySQLDataDB(app App) bool {
+ func jsonArrayColumnType(app App) string {
+ 	return app.Dialect().(columnDialect).JSONArrayColumnType()
+ }
++
++// CollectionsTableDDLFor returns the system _collections table DDL for the
++// provided dialect, falling back to the SQLite default when the dialect
++// does not implement the migrationDialect capability.
++func CollectionsTableDDLFor(d Dialect) string {
++	if md, ok := d.(migrationDialect); ok {
++		return md.CollectionsTableDDL()
++	}
++	return SQLiteDialect{}.CollectionsTableDDL()
++}
++
++// ParamsTableDDLFor returns the system _params table DDL for the provided
++// dialect, falling back to the SQLite default when the dialect does not
++// implement the migrationDialect capability.
++func ParamsTableDDLFor(d Dialect) string {
++	if md, ok := d.(migrationDialect); ok {
++		return md.ParamsTableDDL()
++	}
++	return SQLiteDialect{}.ParamsTableDDL()
++}
++
++// MigrationAppliedColumnTypeFor returns the _migrations.applied column type
++// for the provided dialect, falling back to "INTEGER" (SQLite default) when
++// the dialect does not implement the migrationDialect capability.
++func MigrationAppliedColumnTypeFor(d Dialect) string {
++	if md, ok := d.(migrationDialect); ok {
++		return md.MigrationAppliedColumnType()
++	}
++	return "INTEGER"
++}
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index 3e3f9734..d2d54cfa 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -226,3 +226,55 @@ func TestSchemaSyncDialectMySQL(t *testing.T) {
+ 	require.Equal(t, "DROP INDEX [[idx]] ON [[tbl]]", d.DropIndexSQL("idx", "tbl"))
+ 	require.False(t, d.SupportsPartialIndexes())
+ }
++
++func TestMigrationDialectSQLite(t *testing.T) {
++	d := core.SQLiteDialect{}
++
++	require.NotEmpty(t, d.CollectionsTableDDL())
++	require.Contains(t, d.CollectionsTableDDL(), "randomblob")
++	require.Contains(t, d.CollectionsTableDDL(), "strftime")
++	require.Contains(t, d.CollectionsTableDDL(), "idx__collections_type")
++	require.NotEmpty(t, d.ParamsTableDDL())
++	require.Contains(t, d.ParamsTableDDL(), "randomblob")
++	require.Equal(t, "INTEGER", d.MigrationAppliedColumnType())
++}
++
++func TestMigrationDialectMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	require.NotEmpty(t, d.CollectionsTableDDL())
++	require.Contains(t, d.CollectionsTableDDL(), "VARCHAR(15)")
++	require.Contains(t, d.CollectionsTableDDL(), "idx__collections_type")
++	require.NotEmpty(t, d.ParamsTableDDL())
++	require.Contains(t, d.ParamsTableDDL(), "VARCHAR(15)")
++	require.Equal(t, "BIGINT", d.MigrationAppliedColumnType())
++}
++
++// noopDialect is a minimal Dialect that does not implement migrationDialect,
++// used to verify the exported helper fallback behavior.
++type noopDialect struct{}
++
++func (noopDialect) Name() string { return "noop" }
++
++func TestMigrationDialectHelpers(t *testing.T) {
++	// SQLite helper
++	sqliteDDL := core.CollectionsTableDDLFor(core.SQLiteDialect{})
++	require.Contains(t, sqliteDDL, "randomblob")
++
++	// MySQL helper
++	mysqlDDL := core.CollectionsTableDDLFor(core.MySQLDialect{})
++	require.Contains(t, mysqlDDL, "VARCHAR")
++
++	// Params helpers
++	require.Contains(t, core.ParamsTableDDLFor(core.SQLiteDialect{}), "randomblob")
++	require.Contains(t, core.ParamsTableDDLFor(core.MySQLDialect{}), "VARCHAR")
++
++	// Applied column type helpers
++	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(core.SQLiteDialect{}))
++	require.Equal(t, "BIGINT", core.MigrationAppliedColumnTypeFor(core.MySQLDialect{}))
++
++	// Fallback (dialect that doesn't implement migrationDialect)
++	noopDDL := core.CollectionsTableDDLFor(noopDialect{})
++	require.NotEmpty(t, noopDDL)
++	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(noopDialect{}))
++}
+diff --git a/core/migrations_runner.go b/core/migrations_runner.go
+index 0caff635..63670b6a 100644
+--- a/core/migrations_runner.go
++++ b/core/migrations_runner.go
+@@ -264,11 +264,7 @@ func (r *MigrationsRunner) initMigrationsTable() error {
+ }
+ 
+ func migrationAppliedColumnType(app App) string {
+-	if db, ok := app.ConcurrentDB().(interface{ DriverName() string }); ok && db.DriverName() == "mysql" {
+-		return "BIGINT"
+-	}
+-
+-	return "INTEGER"
++	return MigrationAppliedColumnTypeFor(app.Dialect())
+ }
+ 
+ func (r *MigrationsRunner) isMigrationApplied(txApp App, file string) bool {
+diff --git a/migrations/1640988000_init.go b/migrations/1640988000_init.go
+index d1ad6aeb..fa8673f9 100644
+--- a/migrations/1640988000_init.go
++++ b/migrations/1640988000_init.go
+@@ -2,7 +2,6 @@ package migrations
+ 
+ import (
+ 	"fmt"
+-	"os"
+ 	"path/filepath"
+ 	"runtime"
+ 
+@@ -35,57 +34,12 @@ func init() {
+ 
+ 		// -----------------------------------------------------------
+ 
+-		collectionsSQL := `
+-			CREATE TABLE {{_collections}} (
+-				[[id]]         TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+-				[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+-				[[type]]       TEXT DEFAULT "base" NOT NULL,
+-				[[name]]       TEXT UNIQUE NOT NULL,
+-				[[fields]]     JSON DEFAULT "[]" NOT NULL,
+-				[[indexes]]    JSON DEFAULT "[]" NOT NULL,
+-				[[listRule]]   TEXT DEFAULT NULL,
+-				[[viewRule]]   TEXT DEFAULT NULL,
+-				[[createRule]] TEXT DEFAULT NULL,
+-				[[updateRule]] TEXT DEFAULT NULL,
+-				[[deleteRule]] TEXT DEFAULT NULL,
+-				[[options]]    JSON DEFAULT "{}" NOT NULL,
+-				[[created]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
+-				[[updated]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
+-			);
+-
+-			CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);
+-		`
+-		if isMySQLDataDB(txApp) {
+-			collectionsSQL = `
+-				CREATE TABLE {{_collections}} (
+-					[[id]]         VARCHAR(15) PRIMARY KEY NOT NULL,
+-					[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+-					[[type]]       VARCHAR(255) DEFAULT "base" NOT NULL,
+-					[[name]]       VARCHAR(255) UNIQUE NOT NULL,
+-					[[fields]]     JSON NOT NULL,
+-					[[indexes]]    JSON NOT NULL,
+-					[[listRule]]   TEXT DEFAULT NULL,
+-					[[viewRule]]   TEXT DEFAULT NULL,
+-					[[createRule]] TEXT DEFAULT NULL,
+-					[[updateRule]] TEXT DEFAULT NULL,
+-					[[deleteRule]] TEXT DEFAULT NULL,
+-					[[options]]    JSON NOT NULL,
+-					[[created]]    VARCHAR(255) DEFAULT "" NOT NULL,
+-					[[updated]]    VARCHAR(255) DEFAULT "" NOT NULL
+-				);
+-			`
+-		}
++		collectionsSQL := core.CollectionsTableDDLFor(txApp.Dialect())
+ 
+ 		_, execerr := txApp.DB().NewQuery(collectionsSQL).Execute()
+ 		if execerr != nil {
+ 			return fmt.Errorf("_collections exec error: %w", execerr)
+ 		}
+-		if isMySQLDataDB(txApp) {
+-			_, execerr = txApp.DB().NewQuery("CREATE INDEX idx__collections_type on {{_collections}} ([[type]])").Execute()
+-			if execerr != nil {
+-				return fmt.Errorf("_collections type index error: %w", execerr)
+-			}
+-		}
+ 
+ 		if err := createMFAsCollection(txApp); err != nil {
+ 			return fmt.Errorf("_mfas error: %w", err)
+@@ -134,39 +88,13 @@ func init() {
+ }
+ 
+ func createParamsTable(txApp core.App) error {
+-	query := `
+-		CREATE TABLE {{_params}} (
+-			[[id]]      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+-			[[value]]   JSON DEFAULT NULL,
+-			[[created]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
+-			[[updated]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
+-		);
+-	`
+-	if isMySQLDataDB(txApp) {
+-		query = `
+-			CREATE TABLE {{_params}} (
+-				[[id]]      VARCHAR(15) PRIMARY KEY NOT NULL,
+-				[[value]]   JSON DEFAULT NULL,
+-				[[created]] VARCHAR(255) DEFAULT "" NOT NULL,
+-				[[updated]] VARCHAR(255) DEFAULT "" NOT NULL
+-			);
+-		`
+-	}
++	query := core.ParamsTableDDLFor(txApp.Dialect())
+ 
+ 	_, execErr := txApp.DB().NewQuery(query).Execute()
+ 
+ 	return execErr
+ }
+ 
+-func isMySQLDataDB(app core.App) bool {
+-	if os.Getenv("PB_DATABASE_DRIVER") == "mysql" {
+-		return true
+-	}
+-
+-	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
+-	return ok && db.DriverName() == "mysql"
+-}
+-
+ func createMFAsCollection(txApp core.App) error {
+ 	col := core.NewBaseCollection(core.CollectionNameMFAs)
+ 	col.System = true
+diff --git a/migrations/1717233556_v0.23_migrate.go b/migrations/1717233556_v0.23_migrate.go
+index 56b0d3f1..9789eb71 100644
+--- a/migrations/1717233556_v0.23_migrate.go
++++ b/migrations/1717233556_v0.23_migrate.go
+@@ -20,7 +20,7 @@ import (
+ 
+ func init() {
+ 	core.SystemMigrations.Register(func(txApp core.App) error {
+-		if isMySQLDataDB(txApp) {
++		if txApp.Dialect().Name() != core.DialectSQLiteName {
+ 			return nil
+ 		}
+ 		// note: mfas and authOrigins tables are available only with v0.23
+diff --git a/migrations/1717233557_v0.23_migrate2.go b/migrations/1717233557_v0.23_migrate2.go
+index 756f5cdf..7bc919a2 100644
+--- a/migrations/1717233557_v0.23_migrate2.go
++++ b/migrations/1717233557_v0.23_migrate2.go
+@@ -8,7 +8,7 @@ import (
+ 
+ func init() {
+ 	core.SystemMigrations.Register(func(txApp core.App) error {
+-		if isMySQLDataDB(txApp) {
++		if txApp.Dialect().Name() != core.DialectSQLiteName {
+ 			return nil
+ 		}
+ 		_, err := txApp.DB().NewQuery("CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);").Execute()
+diff --git a/migrations/1717233558_v0.23_migrate3.go b/migrations/1717233558_v0.23_migrate3.go
+index 34505895..286d51eb 100644
+--- a/migrations/1717233558_v0.23_migrate3.go
++++ b/migrations/1717233558_v0.23_migrate3.go
+@@ -21,7 +21,7 @@ func fieldIdChecksum(typ, name string) string {
+ // normalize system collection and field ids
+ func init() {
+ 	core.SystemMigrations.Register(func(txApp core.App) error {
+-		if isMySQLDataDB(txApp) {
++		if txApp.Dialect().Name() != core.DialectSQLiteName {
+ 			return nil
+ 		}
+ 		collections := []*core.Collection{}
+diff --git a/migrations/1717233559_v0.23_migrate4.go b/migrations/1717233559_v0.23_migrate4.go
+index 554e5721..8445aaf5 100644
+--- a/migrations/1717233559_v0.23_migrate4.go
++++ b/migrations/1717233559_v0.23_migrate4.go
+@@ -9,7 +9,7 @@ import (
+ // add new OTP sentTo text field (if not already)
+ func init() {
+ 	core.SystemMigrations.Register(func(txApp core.App) error {
+-		if isMySQLDataDB(txApp) {
++		if txApp.Dialect().Name() != core.DialectSQLiteName {
+ 			return nil
+ 		}
+ 		otpCollection, err := txApp.FindCollectionByNameOrId(core.CollectionNameOTPs)
+diff --git a/migrations/1778828400_normalize_indexes.go b/migrations/1778828400_normalize_indexes.go
+index 40c101a1..406aabea 100644
+--- a/migrations/1778828400_normalize_indexes.go
++++ b/migrations/1778828400_normalize_indexes.go
+@@ -2,7 +2,6 @@ package migrations
+ 
+ import (
+ 	"fmt"
+-	"os"
+ 	"strings"
+ 
+ 	"github.com/pocketbase/dbx"
+@@ -15,7 +14,7 @@ func init() {
+ 	core.SystemMigrations.Register(func(txApp core.App) error {
+ 		// This migration queries sqlite_master which does not exist in MySQL.
+ 		// MySQL indexes are already normalized at creation time by the fork DDL layer.
+-		if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
++		if txApp.Dialect().Name() != core.DialectSQLiteName {
+ 			return nil
+ 		}
+ 
+-- 
+2.54.0.windows.1
+

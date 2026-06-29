@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"strings"
 
@@ -164,51 +163,100 @@ func resolveTokenizedExpr(expr fexpr.Expr, fieldResolver FieldResolver) (dbx.Exp
 		return nil, fmt.Errorf("invalid right operand %q - %v", expr.Right.Literal, rErr)
 	}
 
-	return buildResolversExpr(lResult, expr.Op, rResult, likeEscapeClause(fieldResolver))
+	return buildResolversExpr(lResult, expr.Op, rResult, resolveDialectPrimitives(fieldResolver))
 }
 
-func likeEscapeClause(fieldResolver FieldResolver) string {
-	if r, ok := fieldResolver.(interface{ LikeEscapeClause() string }); ok {
-		return r.LikeEscapeClause()
+// dialectPrimitives bundles all dialect-specific SQL primitives needed
+// when building filter expressions.
+type dialectPrimitives struct {
+	LikeEscape         string
+	EqualityOps        EqualityOperators
+	LikeColumnContains func(column string) string
+}
+
+// dialectPrimitiveResolver is an optional capability interface that
+// resolvers can implement to provide dialect-specific SQL primitives.
+//
+// When a resolver does not implement this interface, SQLite defaults
+// are used (see defaultDialectPrimitives).
+type dialectPrimitiveResolver interface {
+	LikeEscapeClause() string
+	EqualityOperators() EqualityOperators
+	LikeColumnContainsExpr(column string) string
+}
+
+// resolveDialectPrimitives computes the dialect primitives from the
+// provided field resolver, falling back to SQLite defaults when the
+// resolver does not implement dialectPrimitiveResolver.
+func resolveDialectPrimitives(fieldResolver FieldResolver) dialectPrimitives {
+	if r, ok := fieldResolver.(dialectPrimitiveResolver); ok {
+		return dialectPrimitives{
+			LikeEscape:         r.LikeEscapeClause(),
+			EqualityOps:        r.EqualityOperators(),
+			LikeColumnContains: r.LikeColumnContainsExpr,
+		}
 	}
 
-	return defaultLikeEscapeClause()
+	return defaultDialectPrimitives()
+}
+
+func defaultDialectPrimitives() dialectPrimitives {
+	return dialectPrimitives{
+		LikeEscape:  defaultLikeEscapeClause(),
+		EqualityOps: defaultEqualityOperators(),
+		LikeColumnContains: func(column string) string {
+			return fmt.Sprintf("'%%' || %s || '%%'", column)
+		},
+	}
 }
 
 func defaultLikeEscapeClause() string {
-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
-		return " ESCAPE '\\\\'"
-	}
-
 	return " ESCAPE '\\'"
+}
+
+func defaultEqualityOperators() EqualityOperators {
+	return EqualityOperators{
+		Equal: EqualityOperatorSet{
+			EqualOp:     "=",
+			NullEqualOp: "IS",
+			NullConcat:  "OR",
+			NullExpr:    "IS NULL",
+		},
+		NotEqual: EqualityOperatorSet{
+			EqualOp:     "IS NOT",
+			NullEqualOp: "IS NOT",
+			NullConcat:  "AND",
+			NullExpr:    "IS NOT NULL",
+		},
+	}
 }
 
 func buildResolversExpr(
 	left *ResolverResult,
 	op fexpr.SignOp,
 	right *ResolverResult,
-	likeEscape string,
+	primitives dialectPrimitives,
 ) (dbx.Expression, error) {
 	var expr dbx.Expression
 
 	switch op {
 	case fexpr.SignEq, fexpr.SignAnyEq:
-		expr = resolveEqualExpr(true, left, right)
+		expr = resolveEqualExpr(true, left, right, primitives.EqualityOps)
 	case fexpr.SignNeq, fexpr.SignAnyNeq:
-		expr = resolveEqualExpr(false, left, right)
+		expr = resolveEqualExpr(false, left, right, primitives.EqualityOps)
 	case fexpr.SignLike, fexpr.SignAnyLike:
 		// the right side is a column and therefor wrap it with "%" for contains like behavior
 		if len(right.Params) == 0 {
-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
+			expr = dbx.NewExp(fmt.Sprintf("%s LIKE (%s)%s", left.Identifier, primitives.LikeColumnContains(right.Identifier), primitives.LikeEscape), left.Params)
 		} else {
-			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+			expr = dbx.NewExp(fmt.Sprintf("%s LIKE %s%s", left.Identifier, right.Identifier, primitives.LikeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
 		}
 	case fexpr.SignNlike, fexpr.SignAnyNlike:
 		// the right side is a column and therefor wrap it with "%" for not-contains like behavior
 		if len(right.Params) == 0 {
-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE ('%%' || %s || '%%')%s", left.Identifier, right.Identifier, likeEscape), left.Params)
+			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE (%s)%s", left.Identifier, primitives.LikeColumnContains(right.Identifier), primitives.LikeEscape), left.Params)
 		} else {
-			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, likeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
+			expr = dbx.NewExp(fmt.Sprintf("%s NOT LIKE %s%s", left.Identifier, right.Identifier, primitives.LikeEscape), mergeParams(left.Params, wrapLikeParams(right.Params)))
 		}
 	case fexpr.SignLt, fexpr.SignAnyLt:
 		expr = dbx.NewExp(fmt.Sprintf("%s < %s", left.Identifier, right.Identifier), mergeParams(left.Params, right.Params))
@@ -228,9 +276,10 @@ func buildResolversExpr(
 	if !isAnyMatchOp(op) {
 		if left.MultiMatchSubQuery != nil && right.MultiMatchSubQuery != nil {
 			mm := &manyVsManyExpr{
-				left:  left,
-				right: right,
-				op:    op,
+				left:       left,
+				right:      right,
+				op:         op,
+				primitives: primitives,
 			}
 
 			expr = dbx.Enclose(dbx.And(expr, mm))
@@ -240,6 +289,7 @@ func buildResolversExpr(
 				subQuery:     left.MultiMatchSubQuery,
 				op:           op,
 				otherOperand: right,
+				primitives:   primitives,
 			}
 
 			expr = dbx.Enclose(dbx.And(expr, mm))
@@ -250,6 +300,7 @@ func buildResolversExpr(
 				op:           op,
 				otherOperand: left,
 				inverse:      true,
+				primitives:   primitives,
 			}
 
 			expr = dbx.Enclose(dbx.And(expr, mm))
@@ -329,7 +380,7 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
 		}
 
 		args, _ := token.Meta.([]fexpr.Token)
-		return fn(func(argToken fexpr.Token) (*ResolverResult, error) {
+		return fn(fieldResolver, func(argToken fexpr.Token) (*ResolverResult, error) {
 			return resolveToken(argToken, fieldResolver)
 		}, args...)
 	}
@@ -343,31 +394,16 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
 // The expression `a = "" OR a is null` tends to perform better than
 // `COALESCE(a, "") = ""` since the direct match can be accomplished
 // with a seek while the COALESCE will induce a table scan.
-func resolveEqualExpr(equal bool, left, right *ResolverResult) dbx.Expression {
-	isMySQL := strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql")
-
-	equalOp := "="
-	nullEqualOp := "IS"
-	concatOp := "OR"
-	nullExpr := "IS NULL"
+func resolveEqualExpr(equal bool, left, right *ResolverResult, ops EqualityOperators) dbx.Expression {
+	set := ops.Equal
 	if !equal {
-		// always use `IS NOT` instead of `!=` because direct non-equal comparisons
-		// to nullable column values that are actually NULL yields to NULL instead of TRUE, eg.:
-		// `'example' != nullableColumn` -> NULL even if nullableColumn row value is NULL
-		//
-		// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
-		// `IS NOT TRUE`, etc.), so use `<>` for value comparisons while keeping
-		// `IS NOT NULL` for the null check which works in both drivers.
-		if isMySQL {
-			equalOp = "<>"
-			nullEqualOp = "<>"
-		} else {
-			equalOp = "IS NOT"
-			nullEqualOp = equalOp
-		}
-		concatOp = "AND"
-		nullExpr = "IS NOT NULL"
+		set = ops.NotEqual
 	}
+
+	equalOp := set.EqualOp
+	nullEqualOp := set.NullEqualOp
+	concatOp := set.NullConcat
+	nullExpr := set.NullExpr
 
 	// no coalesce fallback (eg. compare to a json field)
 	// a IS b
@@ -650,9 +686,10 @@ var _ dbx.Expression = (*manyVsManyExpr)(nil)
 // Expects leftSubQuery and rightSubQuery to return a subquery with a
 // single "multiMatchValue" column.
 type manyVsManyExpr struct {
-	left  *ResolverResult
-	right *ResolverResult
-	op    fexpr.SignOp
+	left       *ResolverResult
+	right      *ResolverResult
+	op         fexpr.SignOp
+	primitives dialectPrimitives
 }
 
 // Build converts the expression into a SQL fragment.
@@ -679,7 +716,7 @@ func (e *manyVsManyExpr) Build(db *dbx.DB, params dbx.Params) string {
 			// doesn't matter whether it is applied on the left or right subquery operand
 			AfterBuild: dbx.Not, // inverse for the not-exist expression
 		},
-		defaultLikeEscapeClause(),
+		e.primitives,
 	)
 
 	if buildErr != nil {
@@ -711,6 +748,7 @@ type manyVsOneExpr struct {
 	op           fexpr.SignOp
 	inverse      bool
 	nullFallback NullFallbackPreference
+	primitives   dialectPrimitives
 }
 
 // Build converts the expression into a SQL fragment.
@@ -738,9 +776,9 @@ func (e *manyVsOneExpr) Build(db *dbx.DB, params dbx.Params) string {
 	var buildErr error
 
 	if e.inverse {
-		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, defaultLikeEscapeClause())
+		whereExpr, buildErr = buildResolversExpr(r2, e.op, r1, e.primitives)
 	} else {
-		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, defaultLikeEscapeClause())
+		whereExpr, buildErr = buildResolversExpr(r1, e.op, r2, e.primitives)
 	}
 
 	if buildErr != nil {

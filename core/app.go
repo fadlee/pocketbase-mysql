@@ -42,6 +42,13 @@ type App interface {
 	// (aka. whether Bootstrap() was called).
 	IsBootstrapped() bool
 
+	// Dialect returns the SQL dialect used by the app's data database.
+	//
+	// For an unbootstrapped app (or after ResetBootstrapState()) it
+	// falls back to DialectForDriver(""), which honors the
+	// PB_DATABASE_DRIVER env var, defaulting to SQLite.
+	Dialect() Dialect
+
 	// IsTransactional checks if the current app instance is part of a transaction.
 	IsTransactional() bool
 

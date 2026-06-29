@@ -53,7 +53,7 @@ func (app *BaseApp) SaveView(dangerousViewName string, dangerousSelectQuery stri
 		// measure to discourage multiple inline sql statements execution
 		viewSourceAlias := "__pb_view_source"
 		viewQuery := fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s)", dangerousViewName, dangerousSelectQuery)
-		if isMySQLDataDB(txApp) {
+		if d := queryViewDialectIfAvailable(txApp.Dialect()); d != nil && d.RequiresSubqueryAlias() {
 			viewQuery = fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s) [[%s]]", dangerousViewName, dangerousSelectQuery, viewSourceAlias)
 		}
 		_, err = txApp.DB().NewQuery(viewQuery).Execute()
@@ -166,7 +166,7 @@ func (app *BaseApp) DryRunView(dangerousSelectQuery string, sampleSize int) (*Dr
 	records := []*Record{}
 	viewSourceAlias := "__pb_view_source"
 	fromQuery := "(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName
-	if isMySQLDataDB(app) {
+	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil && d.RequiresSubqueryAlias() {
 		fromQuery = "(SELECT * FROM (" + dangerousSelectQuery + ") as " + viewSourceAlias + ") as " + tempName
 	}
 
@@ -259,8 +259,12 @@ func (app *BaseApp) FindRecordByViewFile(viewCollectionModelOrIdentifier any, fi
 	if opt, ok := qf.original.(MultiValuer); !ok || !opt.IsMultiple() {
 		query.AndWhere(dbx.HashExp{cleanFieldName: filename})
 	} else {
+		jsonEachExpr := dbutils.JSONEach(cleanFieldName)
+		if d, ok := app.Dialect().(jsonEachDialect); ok {
+			jsonEachExpr = d.JSONEachColumnExpr(cleanFieldName)
+		}
 		query.InnerJoin(
-			fmt.Sprintf(`%s as {{_je_file}}`, dbutils.JSONEach(cleanFieldName)),
+			fmt.Sprintf(`%s as {{_je_file}}`, jsonEachExpr),
 			dbx.HashExp{"_je_file.value": filename},
 		)
 	}

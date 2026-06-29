@@ -152,7 +152,7 @@ func TestTokenFunctionsGeoDistance(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
-			result, err := fn(s.resolver, s.args...)
+			result, err := fn(nil, s.resolver, s.args...)
 
 			hasErr := err != nil
 			if hasErr != s.expectErr {
@@ -178,7 +178,7 @@ func TestTokenFunctionsGeoDistanceExec(t *testing.T) {
 		t.Error("Expected geoDistance token function to be registered.")
 	}
 
-	result, err := fn(
+	result, err := fn(nil,
 		func(t fexpr.Token) (*ResolverResult, error) {
 			placeholder := "t" + security.PseudorandomString(5)
 			return &ResolverResult{Identifier: "{:" + placeholder + "}", Params: map[string]any{placeholder: t.Literal}}, nil
@@ -498,7 +498,7 @@ func TestTokenFunctionsStrftime(t *testing.T) {
 
 	for _, s := range scenarios {
 		t.Run(s.name, func(t *testing.T) {
-			result, err := fn(s.resolver, s.args...)
+			result, err := fn(nil, s.resolver, s.args...)
 
 			hasErr := err != nil
 			if hasErr != s.expectErr {
@@ -524,7 +524,7 @@ func TestTokenFunctionsStrftimeExec(t *testing.T) {
 		t.Error("Expected strftime token function to be registered.")
 	}
 
-	result, err := fn(
+	result, err := fn(nil,
 		func(t fexpr.Token) (*ResolverResult, error) {
 			placeholder := "t" + security.PseudorandomString(5)
 			return &ResolverResult{Identifier: "{:" + placeholder + "}", Params: map[string]any{placeholder: t.Literal}}, nil

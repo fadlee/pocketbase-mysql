@@ -1,0 +1,257 @@
+From 42cab565c67c3e455e6fcc481977b4cad671d39e Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 13:34:25 +0700
+Subject: [PATCH 87/93] refactor: route collection query SQL through dialect
+
+---
+ core/collection_query.go | 32 ++++++++-------
+ core/db_dialect.go       | 86 ++++++++++++++++++++++++++++++++++++++++
+ core/db_dialect_test.go  | 23 +++++++++++
+ core/view.go             | 10 +++--
+ 4 files changed, 133 insertions(+), 18 deletions(-)
+
+diff --git a/core/collection_query.go b/core/collection_query.go
+index de4c0749..d78f3f0e 100644
+--- a/core/collection_query.go
++++ b/core/collection_query.go
+@@ -39,8 +39,8 @@ func (app *BaseApp) FindAllCollections(collectionTypes ...string) ([]*Collection
+ 	}
+ 
+ 	orderBy := "rowid ASC"
+-	if isMySQLDataDB(app) {
+-		orderBy = "id ASC"
++	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
++		orderBy = d.DefaultCollectionSort()
+ 	}
+ 
+ 	err := q.OrderBy(orderBy).All(&collections)
+@@ -315,15 +315,12 @@ func normalizeViewQueryId(app App, query string) (string, error) {
+ 
+ 	for _, row := range info {
+ 		if strings.EqualFold(row.Name, FieldNameId) {
+-			if strings.EqualFold(row.Type, "TEXT") {
+-				return query, nil // no wrapping needed
+-			}
+-
+-			if isMySQLDataDB(app) {
+-				rowType := strings.ToUpper(row.Type)
+-				if strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT") {
+-					return query, nil // already string-compatible for MySQL ids
++			if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
++				if d.IsIDStringType(row.Type) {
++					return query, nil // no wrapping needed
+ 				}
++			} else if strings.EqualFold(row.Type, "TEXT") {
++				return query, nil // no wrapping needed (SQLite fallback)
+ 			}
+ 		}
+ 	}
+@@ -338,17 +335,22 @@ func normalizeViewQueryId(app App, query string) (string, error) {
+ 	viewSourceAlias := "__pb_view_source"
+ 	for _, col := range rawParsed.columns {
+ 		if col.alias == FieldNameId {
+-			if isMySQLDataDB(app) {
+-				columns = append(columns, fmt.Sprintf("CAST([[%s]] as CHAR(255)) [[%s]]", col.alias, col.alias))
+-			} else {
+-				columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
++			castType := "TEXT"
++			if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
++				castType = d.IDCastType()
+ 			}
++			columns = append(columns, fmt.Sprintf("CAST([[%s]] as %s) [[%s]]", col.alias, castType, col.alias))
+ 		} else {
+ 			columns = append(columns, "[["+col.alias+"]]")
+ 		}
+ 	}
+ 
+-	if isMySQLDataDB(app) {
++	requiresAlias := false
++	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
++		requiresAlias = d.RequiresSubqueryAlias()
++	}
++
++	if requiresAlias {
+ 		query = fmt.Sprintf("SELECT %s FROM (%s) [[%s]]", strings.Join(columns, ","), query, viewSourceAlias)
+ 	} else {
+ 		query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index a9369a7b..76554b77 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -171,6 +171,51 @@ type strftimeDialect interface {
+ 	StrftimeExpr(args []search.TokenFunctionArg) (expr string, params dbx.Params, err error)
+ }
+ 
++// queryViewDialect is a local (unexported) capability interface that
++// exposes dialect-specific query and view SQL generation behavior.
++//
++// It is intentionally kept separate from the exported [Dialect] interface
++// so that the public surface stays minimal while the concrete dialect types
++// can be type-asserted to provide query/view-specific behavior.
++type queryViewDialect interface {
++	// DefaultCollectionSort returns the ORDER BY expression used for
++	// default collection listing queries.
++	//
++	// For SQLite: "rowid ASC"
++	// For MySQL: "id ASC"
++	DefaultCollectionSort() string
++
++	// RequiresSubqueryAlias returns true if the dialect requires an alias
++	// for subqueries in FROM clauses.
++	//
++	// For SQLite: false (subqueries don't need aliases)
++	// For MySQL: true (subqueries require aliases)
++	RequiresSubqueryAlias() bool
++
++	// IDCastType returns the SQL type to cast ID columns to when
++	// normalizing view query IDs.
++	//
++	// For SQLite: "TEXT"
++	// For MySQL: "CHAR(255)"
++	IDCastType() string
++
++	// IsIDStringType returns true if the provided column type is already
++	// string-compatible and doesn't need casting for ID normalization.
++	//
++	// For SQLite: true only if colType is "TEXT"
++	// For MySQL: true if colType contains "CHAR" or "TEXT" (case-insensitive)
++	IsIDStringType(colType string) bool
++}
++
++// queryViewDialectIfAvailable returns the queryViewDialect capability if
++// the provided dialect implements it, or nil otherwise.
++func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
++	if qd, ok := d.(queryViewDialect); ok {
++		return qd
++	}
++	return nil
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -329,6 +374,26 @@ func (SQLiteDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.P
+ 	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
+ }
+ 
++// DefaultCollectionSort implements the [queryViewDialect] interface.
++func (SQLiteDialect) DefaultCollectionSort() string {
++	return "rowid ASC"
++}
++
++// RequiresSubqueryAlias implements the [queryViewDialect] interface.
++func (SQLiteDialect) RequiresSubqueryAlias() bool {
++	return false
++}
++
++// IDCastType implements the [queryViewDialect] interface.
++func (SQLiteDialect) IDCastType() string {
++	return "TEXT"
++}
++
++// IsIDStringType implements the [queryViewDialect] interface.
++func (SQLiteDialect) IsIDStringType(colType string) bool {
++	return strings.EqualFold(colType, "TEXT")
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -610,6 +675,27 @@ func (MySQLDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Pa
+ 	return expr, params, nil
+ }
+ 
++// DefaultCollectionSort implements the [queryViewDialect] interface.
++func (MySQLDialect) DefaultCollectionSort() string {
++	return "id ASC"
++}
++
++// RequiresSubqueryAlias implements the [queryViewDialect] interface.
++func (MySQLDialect) RequiresSubqueryAlias() bool {
++	return true
++}
++
++// IDCastType implements the [queryViewDialect] interface.
++func (MySQLDialect) IDCastType() string {
++	return "CHAR(255)"
++}
++
++// IsIDStringType implements the [queryViewDialect] interface.
++func (MySQLDialect) IsIDStringType(colType string) bool {
++	rowType := strings.ToUpper(colType)
++	return strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT")
++}
++
+ // translateStrftimeFormat converts SQLite strftime format tokens to MySQL
+ // DATE_FORMAT tokens.
+ //
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index dabc1f13..a9f7308d 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -178,3 +178,26 @@ func TestJSONEachColumnExprMySQL(t *testing.T) {
+ 	result = core.MySQLDialect{}.JSONEachColumnExpr("a.b")
+ 	require.Equal(t, expected, result, "MySQLDialect must return MySQL expression regardless of env var")
+ }
++
++func TestQueryViewDialectSQLite(t *testing.T) {
++	d := core.SQLiteDialect{}
++
++	require.Equal(t, "rowid ASC", d.DefaultCollectionSort())
++	require.False(t, d.RequiresSubqueryAlias())
++	require.Equal(t, "TEXT", d.IDCastType())
++	require.True(t, d.IsIDStringType("TEXT"))
++	require.True(t, d.IsIDStringType("text"))
++	require.False(t, d.IsIDStringType("INTEGER"))
++}
++
++func TestQueryViewDialectMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	require.Equal(t, "id ASC", d.DefaultCollectionSort())
++	require.True(t, d.RequiresSubqueryAlias())
++	require.Equal(t, "CHAR(255)", d.IDCastType())
++	require.True(t, d.IsIDStringType("varchar(255)"))
++	require.True(t, d.IsIDStringType("LONGTEXT"))
++	require.True(t, d.IsIDStringType("char(15)"))
++	require.False(t, d.IsIDStringType("INT"))
++}
+diff --git a/core/view.go b/core/view.go
+index 71c3302e..7d0f23e3 100644
+--- a/core/view.go
++++ b/core/view.go
+@@ -53,7 +53,7 @@ func (app *BaseApp) SaveView(dangerousViewName string, dangerousSelectQuery stri
+ 		// measure to discourage multiple inline sql statements execution
+ 		viewSourceAlias := "__pb_view_source"
+ 		viewQuery := fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s)", dangerousViewName, dangerousSelectQuery)
+-		if isMySQLDataDB(txApp) {
++		if d := queryViewDialectIfAvailable(txApp.Dialect()); d != nil && d.RequiresSubqueryAlias() {
+ 			viewQuery = fmt.Sprintf("CREATE VIEW {{%s}} AS SELECT * FROM (%s) [[%s]]", dangerousViewName, dangerousSelectQuery, viewSourceAlias)
+ 		}
+ 		_, err = txApp.DB().NewQuery(viewQuery).Execute()
+@@ -166,7 +166,7 @@ func (app *BaseApp) DryRunView(dangerousSelectQuery string, sampleSize int) (*Dr
+ 	records := []*Record{}
+ 	viewSourceAlias := "__pb_view_source"
+ 	fromQuery := "(SELECT * FROM (" + dangerousSelectQuery + ")) as " + tempName
+-	if isMySQLDataDB(app) {
++	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil && d.RequiresSubqueryAlias() {
+ 		fromQuery = "(SELECT * FROM (" + dangerousSelectQuery + ") as " + viewSourceAlias + ") as " + tempName
+ 	}
+ 
+@@ -259,8 +259,12 @@ func (app *BaseApp) FindRecordByViewFile(viewCollectionModelOrIdentifier any, fi
+ 	if opt, ok := qf.original.(MultiValuer); !ok || !opt.IsMultiple() {
+ 		query.AndWhere(dbx.HashExp{cleanFieldName: filename})
+ 	} else {
++		jsonEachExpr := dbutils.JSONEach(cleanFieldName)
++		if d, ok := app.Dialect().(jsonEachDialect); ok {
++			jsonEachExpr = d.JSONEachColumnExpr(cleanFieldName)
++		}
+ 		query.InnerJoin(
+-			fmt.Sprintf(`%s as {{_je_file}}`, dbutils.JSONEach(cleanFieldName)),
++			fmt.Sprintf(`%s as {{_je_file}}`, jsonEachExpr),
+ 			dbx.HashExp{"_je_file.value": filename},
+ 		)
+ 	}
+-- 
+2.54.0.windows.1
+

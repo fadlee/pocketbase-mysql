@@ -1,0 +1,91 @@
+From f48ca08b963880f8b1539d0bbd45430b5bbbeb9d Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 04:27:48 +0700
+Subject: [PATCH 65/93] Expand dialect refactor plan with implementation
+ guidance, test coverage, and cleanup verification requirements
+
+---
+ docs/dialect-refactor-plan.md | 15 ++++++++++-----
+ 1 file changed, 10 insertions(+), 5 deletions(-)
+
+diff --git a/docs/dialect-refactor-plan.md b/docs/dialect-refactor-plan.md
+index b08298ec..9e78b727 100644
+--- a/docs/dialect-refactor-plan.md
++++ b/docs/dialect-refactor-plan.md
+@@ -10,6 +10,7 @@ Replace the ~53 scattered `if isMySQLDataDB(app)` branches with a single `Dialec
+ - ~53 call sites across ~15 files branch on this function (treat 53 as the current count, not an exhaustive guarantee — re-grep in Patch 7)
+ - 3 duplicate copies of the detection logic (in `migrations/1640988000_init.go`, `core/migrations_runner.go`, `tools/search/filter.go`)
+ - `tools/search` and `tools/dbutils` read the env var directly (no access to `App`)
++- This document is a refactor design/spec, not a step-by-step executable agent plan. If the work will be delegated to agentic workers, convert it into a checkbox implementation plan under `docs/superpowers/plans/` before execution.
+ 
+ ### Important constraints discovered during review
+ 
+@@ -151,6 +152,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `filter.go`: `buildResolversExpr` already receives `likeEscape string` as a parameter. Add an `EqualityOperators` parameter the same way, computed from the resolver in `resolveTokenizedExpr()` via `interface{ EqualityOperators() EqualityOperators }` assertion (defaulting to the SQLite operators when the assertion fails). This removes the direct `PB_DATABASE_DRIVER` read at `filter.go:347` without losing MySQL's `<=>`, `AND`, and `IS NOT NULL` behavior.
+ - `filter.go`: `resolveTokenizedExpr()` must compute all resolver-provided primitives (`likeEscape`, `EqualityOperators`, and LIKE column expression behavior) before calling `buildResolversExpr(...)`; do not only update `buildResolversExpr()` and forget its caller.
+ - `filter.go`: dialectize LIKE expressions where the right operand is another column. SQLite keeps `left LIKE ('%' || right || '%') ESCAPE '\\'`; MySQL uses `left LIKE CONCAT('%', right, '%') ESCAPE '\\\\'`. Do not only change `LikeEscapeClause()` because the string concatenation operator is also dialect-specific. If the primitive is `LikeColumnContainsExpr(left, right, escape string, negated bool) string`, the resulting `dbx.NewExp(...)` must still carry `left.Params`; parameter-backed LIKE branches must continue using `mergeParams(left.Params, wrapLikeParams(right.Params))`.
++- `filter.go`: add a SQLite/default helper for LIKE column-operand formatting, e.g. `defaultLikeColumnContainsExpr(left, right, escape string, negated bool) string`, and use it whenever the resolver does not implement `interface{ LikeColumnContainsExpr(left, right, escape string, negated bool) string }`. Generic resolvers must not be forced to implement dialect primitives.
+ - `filter.go`: `manyVsManyExpr` and `manyVsOneExpr` build SQL later, after the resolver is no longer available. Store `likeEscape` and `EqualityOperators` on these expression structs when they are created. Do not call `defaultLikeEscapeClause()` from their `Build()` methods after this refactor.
+ - `sort.go`: `SortField.BuildExpr(fieldResolver)` already receives the resolver. Instead of an `IsMySQL() bool` flag, assert a method that returns the concrete rowid sort expression, e.g. `interface{ RowidSortIdentifier() string }` — SQLite returns `[[_rowid_]]`, MySQL returns the resolved `id` identifier, a future dialect returns its own. `BuildExpr` then just formats `"<identifier> <direction>"`. This removes the direct `PB_DATABASE_DRIVER` read at `sort.go:35` and keeps the dialect as the single source of truth.
+ - `tools/dbutils/json.go`: all `JSONEach` callers in `core` are replaced with `app.Dialect().JSONEachColumnExpr(column)`. Then remove the `PB_DATABASE_DRIVER` branch from `dbutils.JSONEach`; it is kept as a SQLite-only fallback/helper.
+@@ -204,7 +206,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `core/field_select.go:149` — `app.Dialect().VarCharColumnType(max)` (max calculated from values)
+ - `core/field_editor.go:117` — `app.Dialect().EditorColumnType()`
+ - `core/field_geo_point.go:110` — `app.Dialect().JSONValueColumnType('{"lon":0,"lat":0}')`
+-- `core/db_dialect.go:27` `jsonArrayColumnType()` — `app.Dialect().JSONArrayColumnType()`
++- Find all `jsonArrayColumnType(app)` callers and replace them with `app.Dialect().JSONArrayColumnType()`. Keep `jsonArrayColumnType` only as a temporary wrapper if needed during Patch 2, then remove it in Patch 7.
+ 
+ **Verification:** `go build ./...` + `go test ./...`
+ 
+@@ -230,9 +232,10 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `core/record_field_resolver_runner.go:70` `relationArrayContainsIdentifier` — `resolver.app.Dialect().JSONArrayContainsExpr(jsonCol, idCol)`
+ - `core/record_field_resolver_runner.go:359,378` request-body `json_each({:param})` joins — `resolver.app.Dialect().JSONEachParamExpr(paramName)`
+ - `core/record_field_resolver_runner.go:584,636,699,751` — 4 JOIN sites use `JSONArrayContainsExpr` / `JSONEachColumnExpr` via dialect
++- Update both `registerJoin(dbutils.JSONEach(...), ...)` and `search.Join{TableName: dbutils.JSONEach(...)}` sites. Preserve existing `TableAlias` / join alias behavior because dialect methods return no alias.
+ - `core/record_field_resolver_runner.go:812,817` — `dbutils.JSONArrayLength(...)` becomes `resolver.app.Dialect().JSONArrayLengthExpr(...)`
+ - `core/record_field_resolver_runner.go:830,848` — `dbutils.JSONEach(...)` becomes `resolver.app.Dialect().JSONEachColumnExpr(...)`
+-- `core/record_field_resolver_runner.go:495,501` — JSON/geo path extraction `dbutils.JSONExtract(...)` becomes `resolver.app.Dialect().JSONExtractExpr(...)`
++- `core/record_field_resolver_runner.go:495,501,886,888` — JSON/geo/root path extraction `dbutils.JSONExtract(...)` becomes `resolver.app.Dialect().JSONExtractExpr(...)`
+ - `core/collection_query.go:42` sort — `app.Dialect().DefaultCollectionSort()`
+ - `core/collection_query.go:322,341,351` — `app.Dialect().IDCastType()`, `app.Dialect().RequiresSubqueryAlias()`
+ - `apis/record_crud.go:83` count — `countCol := e.App.Dialect().CountColumn(collection.IsView())`; call `searchProvider.CountCol(countCol)` **only when `countCol != ""`**. Do not call `CountCol("")`: the current provider would build invalid `COUNT(DISTINCT [[table.]])`, not `count(*)`. When the dialect returns `""` for views, leave the provider default count column unless this patch explicitly changes `tools/search.Provider` to support `count(*)`.
+@@ -255,7 +258,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `core/record_field_resolver_test.go` — add MySQL generated-SQL coverage for relation-many joins, back-relation-many joins, request body `:each`, multivalue `:length`, JSON/geo path extraction, and multi-match equality/null fallback behavior.
+ - `core/record_field_resolver_test.go` — JSON/geo path extraction tests must cover MySQL root path, object path, scalar non-JSON column fallback, string comparison, and null comparison so `JSONExtractExpr(...)` semantics are explicit and not left to implementation guesswork.
+ - `tools/search/filter_test.go` — add resolver-backed tests for MySQL equality operators and LIKE column-operand formatting without relying on `PB_DATABASE_DRIVER`.
+-- `tools/search/filter_test.go` — add a same-process cache-safety test that builds the same filter string first with a SQLite/default resolver and then with a MySQL-primitive resolver (and/or reverse order) to prove dialect-specific resolver behavior is not cached from the first build.
++- `tools/search/filter_test.go` — add a same-process cache-safety test that builds the same filter string first with a SQLite/default resolver and then with a MySQL-primitive resolver (and/or reverse order) to prove dialect-specific resolver behavior is not cached from the first build. Cover both equality/null fallback and LIKE column-operand formatting (`||` vs `CONCAT`) in this cache-safety test.
+ - `tools/search/sort_test.go` — add resolver-backed `@rowid` tests proving resolver-provided rowid identifiers are used and env vars are ignored.
+ 
+ **Verification:** `go build ./...` + `go test ./...`
+@@ -289,6 +292,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `migrations/1717233558_v0.23_migrate3.go:24` — same
+ - `migrations/1717233559_v0.23_migrate4.go:12` — same
+ - `migrations/1778828400_normalize_indexes.go:18` — `txApp.Dialect().Name() != "sqlite"`
++- This intentionally skips these legacy SQLite migrations for all non-SQLite dialects, not only MySQL. If a future dialect needs equivalent migration behavior, it must add its own dialect-specific migration path rather than run SQLite migration SQL.
+ - `migrations/1778828400_normalize_indexes.go` — remove now-unused `os`/`strings` imports after replacing the direct `PB_DATABASE_DRIVER` read
+ - `core/migrations_runner.go:267` `migrationAppliedColumnType` — `app.Dialect().MigrationAppliedColumnType()`
+ 
+@@ -302,8 +306,9 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - Grep for any remaining `isMySQLDataDB`, `IsMySQLDataDB`, `PB_DATABASE_DRIVER` references in Go source across **`core/`, `tools/`, `migrations/`, `apis/`, `forms/`, `cmd/`, `examples/`, `plugins/`, and root `pocketbase.go`**. The only allowed production references are:
+   - the `envDatabaseDriver`/`envDatabaseDSN` consts and the `DialectForDriver` factory in `core/db_dialect.go` and `core/db_connect.go`
+   - user-facing CLI help text (whitelist explicitly: `pocketbase.go`, `cmd/serve.go`)
+-  - tests may reference `PB_DATABASE_DRIVER` only in focused dialect/connect tests, not in field/query behavior tests
++- tests may reference `PB_DATABASE_DRIVER` only in focused dialect/connect tests, not in field/query behavior tests
+ - **Migrate the env-var-only tests** (the deliverable flagged in App wiring): `core/field_select_test.go`, `core/field_relation_test.go`, and any other test that does `t.Setenv("PB_DATABASE_DRIVER", "mysql")` after `NewTestApp()`. Set the env var before `NewTestApp()` so `initDataDB()` caches the intended dialect; do not add a public or test-only dialect setter solely for these tests.
++- Migrate any test outside focused dialect/connect tests that uses `PB_DATABASE_DRIVER` to influence field/query/sort behavior, including `tools/search/*_test.go` if present.
+ - Include `plugins/` in cleanup greps because plugin code is production Go code.
+ - Confirm `tools/dbutils/json.go` no longer imports `os` or `strings` solely for dialect detection.
+ - Confirm `tools/search/filter.go`, `tools/search/sort.go`, and `tools/dbutils/json.go` no longer import `os` solely for dialect detection. Any remaining `strings` import must be needed for non-env string handling.
+@@ -312,7 +317,7 @@ The existing interface assertion pattern in `tools/search` is extended. `tools/s
+ - `go build ./...` passes
+ - `go test ./...` passes
+ - `grep -rn "isMySQLDataDB\|IsMySQLDataDB" core/ tools/ migrations/ apis/ forms/ cmd/ examples/ plugins/ pocketbase.go` returns zero results
+-- Production grep for `PB_DATABASE_DRIVER` in `core/ tools/ migrations/ apis/ forms/ plugins/ pocketbase.go` returns only `core/db_dialect.go` + `core/db_connect.go` (the detection factory/connect path) plus user-facing help text in `pocketbase.go`; any test references are limited to focused dialect/connect tests
++- Production grep for `PB_DATABASE_DRIVER` in `core/ tools/ migrations/ apis/ forms/ cmd/ plugins/ pocketbase.go` returns only `core/db_dialect.go` + `core/db_connect.go` (the detection factory/connect path) plus user-facing help text in `pocketbase.go` and `cmd/serve.go`; any test references are limited to focused dialect/connect tests
+ - `grep -rn "dbutils.JSONEach(" core/` returns zero results unless every remaining occurrence is explicitly documented as SQLite-only and safe
+ - `grep -rn "dbutils.JSONExtract(" core/` returns zero results unless every remaining occurrence is explicitly documented as SQLite-only and safe
+ - Query-generation greps for `json_each(`, `json_array_length(`, `JSON_EXTRACT(`, `JSON_LENGTH(`, `JSON_UNQUOTE(`, `JSON_CONTAINS(`, `JSON_TABLE(`, `_rowid_`, and `PRAGMA` in `core/ apis/ tools/search` are reviewed. Remaining raw MySQL/SQLite query-generation functions must be either inside dialect implementations (`core/db_dialect.go`), aux-DB-only paths (`core/log_query.go`, aux checkpoints), tests, `tools/search.SimpleFieldResolver`'s documented SQLite/default JSON path behavior, or explicitly documented SQLite-only helpers. In particular, raw MySQL JSON conversion SQL must not remain in `core/collection_record_table_sync.go` after `SingleToMultiConversionSQL(...)` and `MultiToSingleConversionSQL(...)` are migrated.
+-- 
+2.54.0.windows.1
+

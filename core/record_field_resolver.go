@@ -82,11 +82,80 @@ func (r *RecordFieldResolver) SetAllowHiddenFields(allowHiddenFields bool) {
 }
 
 func (r *RecordFieldResolver) LikeEscapeClause() string {
-	if isMySQLDataDB(r.app) {
-		return " ESCAPE '\\\\'"
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.LikeEscapeClause()
 	}
 
 	return " ESCAPE '\\'"
+}
+
+// EqualityOperators implements the dialect primitive resolver capability
+// by delegating to the app's dialect.
+func (r *RecordFieldResolver) EqualityOperators() search.EqualityOperators {
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.EqualityOperators()
+	}
+
+	// SQLite defaults
+	return search.EqualityOperators{
+		Equal: search.EqualityOperatorSet{
+			EqualOp:     "=",
+			NullEqualOp: "IS",
+			NullConcat:  "OR",
+			NullExpr:    "IS NULL",
+		},
+		NotEqual: search.EqualityOperatorSet{
+			EqualOp:     "IS NOT",
+			NullEqualOp: "IS NOT",
+			NullConcat:  "AND",
+			NullExpr:    "IS NOT NULL",
+		},
+	}
+}
+
+// LikeColumnContainsExpr implements the dialect primitive resolver
+// capability by delegating to the app's dialect.
+func (r *RecordFieldResolver) LikeColumnContainsExpr(column string) string {
+	if d, ok := r.app.Dialect().(equalityDialect); ok {
+		return d.LikeColumnContainsExpr(column)
+	}
+
+	return fmt.Sprintf("'%%' || %s || '%%'", column)
+}
+
+// RowidSortExpr implements the rowidSortResolver capability interface
+// by returning a dialect-specific @rowid sort expression.
+//
+// For SQLite it returns the static `[[_rowid_]] {direction}` expression.
+// For MySQL it resolves the "id" field and returns `{resolved} {direction}`.
+func (r *RecordFieldResolver) RowidSortExpr(direction string) (string, error) {
+	if r.app.Dialect().Name() == DialectMySQLName {
+		result, err := r.Resolve("id")
+		if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
+			return "", fmt.Errorf("invalid sort field %q", "@rowid")
+		}
+
+		return fmt.Sprintf("%s %s", result.Identifier, direction), nil
+	}
+
+	// SQLite default
+	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
+}
+
+// StrftimeExpr implements the [search.strftimeResolver] interface.
+//
+// It delegates to the dialect's StrftimeExpr method if available, or
+// returns an error if the dialect doesn't support strftime.
+func (r *RecordFieldResolver) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
+	if d, ok := r.app.Dialect().(strftimeDialect); ok {
+		return d.StrftimeExpr(args)
+	}
+	// fallback for tests without a real dialect — use SQLite expression
+	identifiers := make([]string, 0, len(args))
+	for _, arg := range args {
+		identifiers = append(identifiers, arg.Result.Identifier)
+	}
+	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
 }
 
 // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
@@ -437,6 +506,61 @@ func (r *RecordFieldResolver) registerJoin(tableName string, tableAlias string, 
 
 	// register new join
 	r.joins = append(r.joins, newJoin)
+	return nil
+}
+
+// registerJoinExpr registers a raw table expression join (e.g. `json_each(...)`
+// or `JSON_TABLE(...)`) without performing a collection/list-rule lookup.
+//
+// The tableExpr is stored verbatim and marked with RawTableExpr=true so that
+// MultiMatchSubquery.Build() skips quoting it.
+func (r *RecordFieldResolver) registerJoinExpr(tableExpr, tableAlias string, on dbx.Expression) error {
+	newJoin := &search.Join{
+		TableName:    tableExpr,
+		TableAlias:   tableAlias,
+		On:           on,
+		RawTableExpr: true,
+	}
+
+	// replace existing join with the same alias
+	for i, j := range r.joins {
+		if j.TableAlias == newJoin.TableAlias {
+			r.joins[i] = newJoin
+			return nil
+		}
+	}
+
+	r.joins = append(r.joins, newJoin)
+	return nil
+}
+
+// jsonEachDialectIfAvailable returns the jsonEachDialect capability if the
+// configured dialect implements it, or nil otherwise (e.g. in tests without
+// a real dialect).
+func (r *RecordFieldResolver) jsonEachDialectIfAvailable() jsonEachDialect {
+	if d, ok := r.app.Dialect().(jsonEachDialect); ok {
+		return d
+	}
+	return nil
+}
+
+// jsonLengthDialectIfAvailable returns the jsonLengthDialect capability if
+// the configured dialect implements it, or nil otherwise (e.g. in tests
+// without a real dialect).
+func (r *RecordFieldResolver) jsonLengthDialectIfAvailable() jsonLengthDialect {
+	if d, ok := r.app.Dialect().(jsonLengthDialect); ok {
+		return d
+	}
+	return nil
+}
+
+// jsonExtractDialectIfAvailable returns the jsonExtractDialect capability if
+// the configured dialect implements it, or nil otherwise (e.g. in tests
+// without a real dialect).
+func (r *RecordFieldResolver) jsonExtractDialectIfAvailable() jsonExtractDialect {
+	if d, ok := r.app.Dialect().(jsonExtractDialect); ok {
+		return d
+	}
 	return nil
 }
 

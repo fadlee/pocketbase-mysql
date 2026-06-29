@@ -606,6 +606,127 @@ func TestProviderFilterAndSortLimits(t *testing.T) {
 	}
 }
 
+// TestProviderRowidSortPrefixing verifies that @rowid sort expressions
+// are correctly prefixed with the first FROM table, producing valid SQL
+// (e.g. "[[test]].[[_rowid_]] DESC" rather than the broken
+// "[[test.]][[_rowid_]] DESC").
+func TestProviderRowidSortPrefixing(t *testing.T) {
+	testDB, err := createTestDB()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer testDB.Close()
+
+	query := testDB.Select("*").
+		From("test").
+		Where(dbx.Not(dbx.HashExp{"test1": nil})).
+		OrderBy("test1 ASC")
+
+	scenarios := []struct {
+		name          string
+		resolver      FieldResolver
+		sort          []SortField
+		skipTotal     bool
+		expectError   bool
+		expectQueries []string
+	}{
+		{
+			"SQLite default (testFieldResolver, no rowidSortResolver)",
+			&testFieldResolver{},
+			[]SortField{{"@rowid", SortDesc}},
+			true, // skipTotal to only check the models query
+			false,
+			[]string{
+				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[_rowid_]] DESC LIMIT 30",
+			},
+		},
+		{
+			"SQLite default (testFieldResolver, asc)",
+			&testFieldResolver{},
+			[]SortField{{"@rowid", SortAsc}},
+			true,
+			false,
+			[]string{
+				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[_rowid_]] ASC LIMIT 30",
+			},
+		},
+		{
+			"MySQL resolver (id already table-prefixed, no extra prefixing)",
+			&mysqlProviderTestResolver{identifier: "[[test.id]]"},
+			[]SortField{{"@rowid", SortDesc}},
+			true,
+			false,
+			[]string{
+				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test.id]] DESC LIMIT 30",
+			},
+		},
+		{
+			"MySQL resolver (id without table prefix, gets prefixed)",
+			&mysqlProviderTestResolver{identifier: "[[id]]"},
+			[]SortField{{"@rowid", SortDesc}},
+			true,
+			false,
+			[]string{
+				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[id]] DESC LIMIT 30",
+			},
+		},
+	}
+
+	for _, s := range scenarios {
+		t.Run(s.name, func(t *testing.T) {
+			testDB.CalledQueries = []string{} // reset
+
+			p := NewProvider(s.resolver).
+				Query(query).
+				Sort(s.sort).
+				SkipTotal(s.skipTotal)
+
+			_, err := p.Exec(&[]testTableStruct{})
+
+			hasErr := err != nil
+			if hasErr != s.expectError {
+				t.Fatalf("Expected hasErr %v, got %v (%v)", s.expectError, hasErr, err)
+			}
+
+			if hasErr {
+				return
+			}
+
+			if len(s.expectQueries) != len(testDB.CalledQueries) {
+				t.Fatalf("Expected %d queries, got %d: \n%v", len(s.expectQueries), len(testDB.CalledQueries), testDB.CalledQueries)
+			}
+
+			for _, q := range testDB.CalledQueries {
+				if !list.ExistInSliceWithRegex(q, s.expectQueries) {
+					t.Fatalf("Didn't expect query \n%v \nin \n%v", q, s.expectQueries)
+				}
+			}
+		})
+	}
+}
+
+// mysqlProviderTestResolver is a test resolver that implements the
+// rowidSortResolver capability to simulate MySQL @rowid behavior for
+// provider prefixing tests.
+type mysqlProviderTestResolver struct {
+	identifier string
+}
+
+func (r *mysqlProviderTestResolver) UpdateQuery(_ *dbx.SelectQuery) error { return nil }
+func (r *mysqlProviderTestResolver) Resolve(field string) (*ResolverResult, error) {
+	if field == "id" {
+		return &ResolverResult{Identifier: r.identifier}, nil
+	}
+	return &ResolverResult{Identifier: field}, nil
+}
+func (r *mysqlProviderTestResolver) RowidSortExpr(direction string) (string, error) {
+	result, err := r.Resolve("id")
+	if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
+		return "", fmt.Errorf("invalid sort field %q", "@rowid")
+	}
+	return fmt.Sprintf("%s %s", result.Identifier, direction), nil
+}
+
 func TestProviderParseAndExec(t *testing.T) {
 	testDB, err := createTestDB()
 	if err != nil {

@@ -1,0 +1,93 @@
+From 7af8d21bc2458b22f1481c4d3af20ae9ea4b89ee Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 10:39:05 +0700
+Subject: [PATCH 71/93] test: prove env-forced dialect bootstrap
+
+---
+ core/db_dialect_test.go | 25 +++++++++++++++++++++++++
+ go.mod                  |  4 ++++
+ go.sum                  |  1 +
+ 3 files changed, 30 insertions(+)
+ create mode 100644 core/db_dialect_test.go
+
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+new file mode 100644
+index 00000000..f910c7bd
+--- /dev/null
++++ b/core/db_dialect_test.go
+@@ -0,0 +1,25 @@
++package core_test
++
++import (
++	"testing"
++
++	"github.com/pocketbase/dbx"
++	"github.com/pocketbase/pocketbase/core"
++	"github.com/pocketbase/pocketbase/tests"
++	"github.com/stretchr/testify/require"
++)
++
++func TestEnvForcedMySQLBootstrapWithSQLiteTestApp(t *testing.T) {
++	t.Setenv("PB_DATABASE_DRIVER", "mysql")
++
++	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
++		DBConnect: func(dbPath string) (*dbx.DB, error) {
++			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
++			return dbx.Open("sqlite", dbPath+pragmas)
++		},
++	})
++	require.NoError(t, err)
++	defer app.Cleanup()
++
++	require.True(t, core.IsMySQLDataDB(app))
++}
+diff --git a/go.mod b/go.mod
+index f2915e41..a8d8ab04 100644
+--- a/go.mod
++++ b/go.mod
+@@ -18,6 +18,7 @@ require (
+ 	github.com/pocketbase/tygoja v0.0.0-20250812183945-97ffe055281f
+ 	github.com/spf13/cast v1.10.0
+ 	github.com/spf13/cobra v1.10.2
++	github.com/stretchr/testify v1.4.0
+ 	golang.org/x/crypto v0.52.0
+ 	golang.org/x/image v0.41.0
+ 	golang.org/x/net v0.55.0
+@@ -29,6 +30,7 @@ require (
+ require (
+ 	filippo.io/edwards25519 v1.2.0 // indirect
+ 	github.com/asaskevich/govalidator v0.0.0-20230301143203-a9d515a09cc2 // indirect
++	github.com/davecgh/go-spew v1.1.0 // indirect
+ 	github.com/dlclark/regexp2/v2 v2.2.1 // indirect
+ 	github.com/dop251/base64dec v0.0.0-20231022112746-c6c9f9a96217 // indirect
+ 	github.com/dustin/go-humanize v1.0.1 // indirect
+@@ -39,12 +41,14 @@ require (
+ 	github.com/mattn/go-colorable v0.1.14 // indirect
+ 	github.com/mattn/go-isatty v0.0.22 // indirect
+ 	github.com/ncruces/go-strftime v1.0.0 // indirect
++	github.com/pmezard/go-difflib v1.0.0 // indirect
+ 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
+ 	github.com/spf13/pflag v1.0.10 // indirect
+ 	golang.org/x/mod v0.36.0 // indirect
+ 	golang.org/x/sys v0.45.0 // indirect
+ 	golang.org/x/text v0.38.0 // indirect
+ 	golang.org/x/tools v0.45.0 // indirect
++	gopkg.in/yaml.v2 v2.2.2 // indirect
+ 	modernc.org/libc v1.72.3 // indirect
+ 	modernc.org/mathutil v1.7.1 // indirect
+ 	modernc.org/memory v1.11.0 // indirect
+diff --git a/go.sum b/go.sum
+index 0a93ac0b..4b2dcdd9 100644
+--- a/go.sum
++++ b/go.sum
+@@ -112,6 +112,7 @@ golang.org/x/tools v0.0.0-20180917221912-90fa682c2a6e/go.mod h1:n7NCudcB/nEzxVGm
+ golang.org/x/tools v0.45.0 h1:18qN3FAooORvApf5XjCXgsuayZOEtXf6JK18I3+ONa8=
+ golang.org/x/tools v0.45.0/go.mod h1:LuUGqqaXcXMEFEruIVJVm5mgDD8vww/z/SR1gQ4uE/0=
+ google.golang.org/appengine v1.6.5/go.mod h1:8WjMMxjGQR8xUklV/ARdw2HLXBOI7O7uCIDZVag1xfc=
++gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405 h1:yhCVgyC4o1eVCa2tZl7eS0r+SDo693bJlVdllGtEeKM=
+ gopkg.in/check.v1 v0.0.0-20161208181325-20d25e280405/go.mod h1:Co6ibVJAznAaIkqp8huTwlJQCZ016jof/cbN4VW5Yz0=
+ gopkg.in/yaml.v2 v2.2.2 h1:ZCJp+EgiOT7lHqUV2J862kp8Qj64Jo6az82+3Td9dZw=
+ gopkg.in/yaml.v2 v2.2.2/go.mod h1:hI93XBmqTisBFMUTm0b8Fm+jr3Dg1NNxqwp+5A1VGuI=
+-- 
+2.54.0.windows.1
+

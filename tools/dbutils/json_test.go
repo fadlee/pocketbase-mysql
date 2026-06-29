@@ -16,6 +16,29 @@ func TestJSONEach(t *testing.T) {
 	}
 }
 
+func TestJSONEachEnvVarIndependent(t *testing.T) {
+	// JSONEach is now a SQLite-only helper and must return the SQLite
+	// expression regardless of the PB_DATABASE_DRIVER env var.
+	// Call sites that need dialect-aware behavior use the
+	// jsonEachDialect capability interface instead.
+
+	expected := "json_each(CASE WHEN iif(json_valid([[a.b]]), json_type([[a.b]])='array', FALSE) THEN [[a.b]] ELSE json_array([[a.b]]) END)"
+
+	// SQLite (default)
+	t.Setenv("PB_DATABASE_DRIVER", "")
+	result := dbutils.JSONEach("a.b")
+	if result != expected {
+		t.Fatalf("Expected SQLite expression\n%v\ngot\n%v", expected, result)
+	}
+
+	// MySQL env var should NOT change the output
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+	result = dbutils.JSONEach("a.b")
+	if result != expected {
+		t.Fatalf("Expected SQLite expression regardless of env var\n%v\ngot\n%v", expected, result)
+	}
+}
+
 func TestJSONArrayLength(t *testing.T) {
 	result := dbutils.JSONArrayLength("a.b")
 

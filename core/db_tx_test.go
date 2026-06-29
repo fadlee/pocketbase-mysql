@@ -6,6 +6,7 @@ import (
 
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
+	"github.com/stretchr/testify/require"
 )
 
 func TestRunInTransaction(t *testing.T) {
@@ -410,4 +411,37 @@ func TestTransactionFromInnerDeleteHook(t *testing.T) {
 			t.Fatalf("Expected %q %d calls, got %d", k, total, found)
 		}
 	}
+}
+
+func TestTransactionInheritsParentDataDialect(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	parentDialect := app.Dialect()
+	require.NotNil(t, parentDialect)
+
+	err := app.RunInTransaction(func(txApp core.App) error {
+		d := txApp.Dialect()
+		require.NotNil(t, d)
+		require.Equal(t, parentDialect.Name(), d.Name())
+		return nil
+	})
+	require.NoError(t, err)
+}
+
+func TestAuxTransactionPreservesParentDataDialect(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	parentDialect := app.Dialect()
+	require.NotNil(t, parentDialect)
+
+	err := app.AuxRunInTransaction(func(txApp core.App) error {
+		// aux transaction should still expose the parent's data dialect
+		d := txApp.Dialect()
+		require.NotNil(t, d)
+		require.Equal(t, parentDialect.Name(), d.Name())
+		return nil
+	})
+	require.NoError(t, err)
 }

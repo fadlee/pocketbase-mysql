@@ -1,0 +1,368 @@
+From 96f1a5b074b84f86ad58f3e2b922da548f80f3e2 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:52:49 +0700
+Subject: [PATCH 77/93] refactor: support raw dialect join expressions
+
+---
+ core/record_field_resolver.go               |  25 +++++
+ core/record_field_resolver_internal_test.go | 108 ++++++++++++++++++
+ tools/search/multi_match_subquery.go        |  44 ++++++--
+ tools/search/multi_match_subquery_test.go   | 118 ++++++++++++++++++++
+ 4 files changed, 284 insertions(+), 11 deletions(-)
+ create mode 100644 core/record_field_resolver_internal_test.go
+
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index 7f02ff85..d1f6dfdf 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -493,6 +493,31 @@ func (r *RecordFieldResolver) registerJoin(tableName string, tableAlias string,
+ 	return nil
+ }
+ 
++// registerJoinExpr registers a raw table expression join (e.g. `json_each(...)`
++// or `JSON_TABLE(...)`) without performing a collection/list-rule lookup.
++//
++// The tableExpr is stored verbatim and marked with RawTableExpr=true so that
++// MultiMatchSubquery.Build() skips quoting it.
++func (r *RecordFieldResolver) registerJoinExpr(tableExpr, tableAlias string, on dbx.Expression) error {
++	newJoin := &search.Join{
++		TableName:    tableExpr,
++		TableAlias:   tableAlias,
++		On:           on,
++		RawTableExpr: true,
++	}
++
++	// replace existing join with the same alias
++	for i, j := range r.joins {
++		if j.TableAlias == newJoin.TableAlias {
++			r.joins[i] = newJoin
++			return nil
++		}
++	}
++
++	r.joins = append(r.joins, newJoin)
++	return nil
++}
++
+ func (r *RecordFieldResolver) registerRuleJoin(collection *Collection, tableAlias string) {
+ 	// replace existing
+ 	for i, j := range r.listRuleJoins {
+diff --git a/core/record_field_resolver_internal_test.go b/core/record_field_resolver_internal_test.go
+new file mode 100644
+index 00000000..9eb8fc10
+--- /dev/null
++++ b/core/record_field_resolver_internal_test.go
+@@ -0,0 +1,108 @@
++package core
++
++import (
++	"database/sql"
++	"strings"
++	"testing"
++
++	"github.com/pocketbase/dbx"
++	"github.com/pocketbase/pocketbase/tools/search"
++)
++
++// TestRegisterJoinExpr tests that registerJoinExpr registers a raw join
++// that skips collection/list-rule lookup and is not quoted in the output SQL.
++func TestRegisterJoinExpr(t *testing.T) {
++	t.Run("registers raw join skipping collection/list-rule lookup", func(t *testing.T) {
++		// registerJoinExpr does not use r.app, so a zero-value resolver is sufficient
++		r := &RecordFieldResolver{}
++
++		// registerJoinExpr should succeed even without allowHiddenFields
++		// because it skips the collection/list-rule lookup entirely
++		err := r.registerJoinExpr("json_each({:jeParam})", "test_raw_alias", nil)
++		if err != nil {
++			t.Fatalf("Expected no error from registerJoinExpr, got %v", err)
++		}
++
++		// verify the join was registered with RawTableExpr=true
++		if len(r.joins) != 1 {
++			t.Fatalf("Expected 1 join, got %d", len(r.joins))
++		}
++		if r.joins[0].TableName != "json_each({:jeParam})" {
++			t.Fatalf("Expected TableName %q, got %q", "json_each({:jeParam})", r.joins[0].TableName)
++		}
++		if r.joins[0].TableAlias != "test_raw_alias" {
++			t.Fatalf("Expected TableAlias %q, got %q", "test_raw_alias", r.joins[0].TableAlias)
++		}
++		if !r.joins[0].RawTableExpr {
++			t.Fatal("Expected RawTableExpr to be true")
++		}
++
++		// no list rule joins should have been registered
++		if len(r.listRuleJoins) != 0 {
++			t.Fatalf("Expected 0 list rule joins, got %d", len(r.listRuleJoins))
++		}
++	})
++
++	t.Run("replaces existing join with same alias", func(t *testing.T) {
++		r := &RecordFieldResolver{}
++
++		err := r.registerJoinExpr("json_each({:p1})", "dup_alias", nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		err = r.registerJoinExpr("JSON_TABLE({:p2}, '$' COLUMNS (val VARCHAR(255) PATH '$'))", "dup_alias", nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		if len(r.joins) != 1 {
++			t.Fatalf("Expected 1 join after replace, got %d", len(r.joins))
++		}
++		if r.joins[0].TableName != "JSON_TABLE({:p2}, '$' COLUMNS (val VARCHAR(255) PATH '$'))" {
++			t.Fatalf("Expected replaced TableName, got %q", r.joins[0].TableName)
++		}
++	})
++
++	t.Run("raw join builds unquoted in MultiMatchSubquery", func(t *testing.T) {
++		// verify that a Join with RawTableExpr=true renders unquoted via
++		// MultiMatchSubquery.Build (the primary consumer of the flag)
++		r := &RecordFieldResolver{}
++		err := r.registerJoinExpr("json_each({:jeParam})", "je_alias", nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++
++		// build a MultiMatchSubquery using the registered join
++		joins := make([]*search.Join, 0, len(r.joins))
++		for _, j := range r.joins {
++			joins = append(joins, &search.Join{
++				TableName:    j.TableName,
++				TableAlias:   j.TableAlias,
++				On:           j.On,
++				RawTableExpr: j.RawTableExpr,
++			})
++		}
++
++		mm := &search.MultiMatchSubquery{
++			TargetTableAlias: "target",
++			FromTableName:    "from_table",
++			FromTableAlias:   "from_alias",
++			ValueIdentifier:  "from_alias.field",
++			Joins:            joins,
++		}
++
++		sqlDB, err := sql.Open("sqlite", "file::memory:?cache=shared")
++		if err != nil {
++			t.Fatal(err)
++		}
++		db := dbx.NewFromDB(sqlDB, "sqlite")
++
++		result := mm.Build(db, dbx.Params{})
++
++		// the raw table expression should appear unquoted
++		if !strings.Contains(result, "LEFT JOIN json_each({:jeParam}) `je_alias`") {
++			t.Fatalf("Expected unquoted raw table expression in build result:\n%s", result)
++		}
++	})
++}
+diff --git a/tools/search/multi_match_subquery.go b/tools/search/multi_match_subquery.go
+index d1ed8bac..4617a2d9 100644
+--- a/tools/search/multi_match_subquery.go
++++ b/tools/search/multi_match_subquery.go
+@@ -10,20 +10,31 @@ import (
+ var _ dbx.Expression = (*MultiMatchSubquery)(nil)
+ 
+ // Join defines common fields required for a single SQL JOIN clause.
++//
++// When RawTableExpr is true, TableName is treated as a raw SQL table
++// expression (e.g. `json_each(...)` or `JSON_TABLE(...)`) and is written
++// verbatim without being passed through db.QuoteTableName. The TableAlias
++// is still quoted normally.
+ type Join struct {
+-	TableName  string
+-	TableAlias string
+-	On         dbx.Expression
++	TableName    string
++	TableAlias   string
++	On           dbx.Expression
++	RawTableExpr bool
+ }
+ 
+ // MultiMatchSubquery defines a multi-match record subquery expression.
++//
++// When ValueIdentifierRaw is true, ValueIdentifier is treated as a raw SQL
++// expression and is written verbatim without being passed through
++// db.QuoteColumnName.
+ type MultiMatchSubquery struct {
+-	TargetTableAlias string
+-	FromTableName    string
+-	FromTableAlias   string
+-	ValueIdentifier  string
+-	Joins            []*Join
+-	Params           dbx.Params
++	TargetTableAlias   string
++	FromTableName      string
++	FromTableAlias     string
++	ValueIdentifier    string
++	ValueIdentifierRaw bool
++	Joins              []*Join
++	Params             dbx.Params
+ }
+ 
+ // Build converts the expression into a SQL fragment.
+@@ -49,7 +60,13 @@ func (m *MultiMatchSubquery) Build(db *dbx.DB, params dbx.Params) string {
+ 			mergedJoins.WriteString(" ")
+ 		}
+ 		mergedJoins.WriteString("LEFT JOIN ")
+-		mergedJoins.WriteString(db.QuoteTableName(j.TableName))
++		if j.RawTableExpr {
++			// raw table expression (e.g. json_each(...) or JSON_TABLE(...))
++			// should not be quoted
++			mergedJoins.WriteString(j.TableName)
++		} else {
++			mergedJoins.WriteString(db.QuoteTableName(j.TableName))
++		}
+ 		mergedJoins.WriteString(" ")
+ 		mergedJoins.WriteString(db.QuoteTableName(j.TableAlias))
+ 		if j.On != nil {
+@@ -58,9 +75,14 @@ func (m *MultiMatchSubquery) Build(db *dbx.DB, params dbx.Params) string {
+ 		}
+ 	}
+ 
++	valueIdentifier := m.ValueIdentifier
++	if !m.ValueIdentifierRaw {
++		valueIdentifier = db.QuoteColumnName(m.ValueIdentifier)
++	}
++
+ 	return fmt.Sprintf(
+ 		`SELECT %s as [[multiMatchValue]] FROM %s %s %s WHERE %s = %s`,
+-		db.QuoteColumnName(m.ValueIdentifier),
++		valueIdentifier,
+ 		db.QuoteTableName(m.FromTableName),
+ 		db.QuoteTableName(m.FromTableAlias),
+ 		mergedJoins.String(),
+diff --git a/tools/search/multi_match_subquery_test.go b/tools/search/multi_match_subquery_test.go
+index 6caae968..b0e9481c 100644
+--- a/tools/search/multi_match_subquery_test.go
++++ b/tools/search/multi_match_subquery_test.go
+@@ -50,3 +50,121 @@ func TestMultiMatchSubqueryBuild(t *testing.T) {
+ 		t.Fatalf("Expected final params\n%s\ngot\n%s", expectedParams, rawParams)
+ 	}
+ }
++
++func TestMultiMatchSubqueryBuildRawTableExpr(t *testing.T) {
++	// create a dummy db
++	sqlDB, err := sql.Open("sqlite", "file::memory:?cache=shared")
++	if err != nil {
++		t.Fatal(err)
++	}
++	db := dbx.NewFromDB(sqlDB, "sqlite")
++
++	t.Run("json_each raw table expression (alias still quoted)", func(t *testing.T) {
++		mm := search.MultiMatchSubquery{
++			TargetTableAlias: "test_TargetTableAlias",
++			FromTableName:    "test_FromTableName",
++			FromTableAlias:   "test_FromTableAlias",
++			ValueIdentifier:  "test_FromTableAlias.field",
++			Joins: []*search.Join{
++				{
++					TableName:    "json_each({:jeParam})",
++					TableAlias:   "je_alias",
++					RawTableExpr: true,
++				},
++			},
++			Params: dbx.Params{"jeParam": "test_je"},
++		}
++
++		result := mm.Build(db, dbx.Params{})
++
++		expectedResult := "SELECT `test_FromTableAlias`.`field` as [[multiMatchValue]] FROM `test_FromTableName` `test_FromTableAlias` LEFT JOIN json_each({:jeParam}) `je_alias` WHERE `test_FromTableAlias`.`id` = `test_TargetTableAlias`.`id`"
++		if expectedResult != result {
++			t.Fatalf("Expected build result\n%v\ngot\n%v", expectedResult, result)
++		}
++	})
++
++	t.Run("JSON_TABLE raw table expression (alias still quoted)", func(t *testing.T) {
++		mm := search.MultiMatchSubquery{
++			TargetTableAlias: "test_TargetTableAlias",
++			FromTableName:    "test_FromTableName",
++			FromTableAlias:   "test_FromTableAlias",
++			ValueIdentifier:  "test_FromTableAlias.field",
++			Joins: []*search.Join{
++				{
++					TableName:    "JSON_TABLE({:jtParam}, '$[*]' COLUMNS (value VARCHAR(255) PATH '$'))",
++					TableAlias:   "jt_alias",
++					RawTableExpr: true,
++				},
++			},
++			Params: dbx.Params{"jtParam": "test_jt"},
++		}
++
++		result := mm.Build(db, dbx.Params{})
++
++		expectedResult := "SELECT `test_FromTableAlias`.`field` as [[multiMatchValue]] FROM `test_FromTableName` `test_FromTableAlias` LEFT JOIN JSON_TABLE({:jtParam}, '$[*]' COLUMNS (value VARCHAR(255) PATH '$')) `jt_alias` WHERE `test_FromTableAlias`.`id` = `test_TargetTableAlias`.`id`"
++		if expectedResult != result {
++			t.Fatalf("Expected build result\n%v\ngot\n%v", expectedResult, result)
++		}
++	})
++
++	t.Run("regular join table names are still quoted", func(t *testing.T) {
++		mm := search.MultiMatchSubquery{
++			TargetTableAlias: "test_TargetTableAlias",
++			FromTableName:    "test_FromTableName",
++			FromTableAlias:   "test_FromTableAlias",
++			ValueIdentifier:  "test_FromTableAlias.field",
++			Joins: []*search.Join{
++				{TableName: "regular_table", TableAlias: "regular_alias"},
++			},
++		}
++
++		result := mm.Build(db, dbx.Params{})
++
++		expectedResult := "SELECT `test_FromTableAlias`.`field` as [[multiMatchValue]] FROM `test_FromTableName` `test_FromTableAlias` LEFT JOIN `regular_table` `regular_alias` WHERE `test_FromTableAlias`.`id` = `test_TargetTableAlias`.`id`"
++		if expectedResult != result {
++			t.Fatalf("Expected build result\n%v\ngot\n%v", expectedResult, result)
++		}
++	})
++}
++
++func TestMultiMatchSubqueryBuildRawValueIdentifier(t *testing.T) {
++	// create a dummy db
++	sqlDB, err := sql.Open("sqlite", "file::memory:?cache=shared")
++	if err != nil {
++		t.Fatal(err)
++	}
++	db := dbx.NewFromDB(sqlDB, "sqlite")
++
++	t.Run("raw value identifier is not quoted", func(t *testing.T) {
++		mm := search.MultiMatchSubquery{
++			TargetTableAlias:   "test_TargetTableAlias",
++			FromTableName:      "test_FromTableName",
++			FromTableAlias:     "test_FromTableAlias",
++			ValueIdentifier:    "SOME_RAW_COLUMN_EXPR",
++			ValueIdentifierRaw: true,
++		}
++
++		result := mm.Build(db, dbx.Params{})
++
++		expectedResult := "SELECT SOME_RAW_COLUMN_EXPR as [[multiMatchValue]] FROM `test_FromTableName` `test_FromTableAlias`  WHERE `test_FromTableAlias`.`id` = `test_TargetTableAlias`.`id`"
++		if expectedResult != result {
++			t.Fatalf("Expected build result\n%v\ngot\n%v", expectedResult, result)
++		}
++	})
++
++	t.Run("regular value identifier is still quoted", func(t *testing.T) {
++		mm := search.MultiMatchSubquery{
++			TargetTableAlias: "test_TargetTableAlias",
++			FromTableName:    "test_FromTableName",
++			FromTableAlias:   "test_FromTableAlias",
++			ValueIdentifier:  "test_FromTableAlias.field",
++		}
++
++		result := mm.Build(db, dbx.Params{})
++
++		expectedResult := "SELECT `test_FromTableAlias`.`field` as [[multiMatchValue]] FROM `test_FromTableName` `test_FromTableAlias`  WHERE `test_FromTableAlias`.`id` = `test_TargetTableAlias`.`id`"
++		if expectedResult != result {
++			t.Fatalf("Expected build result\n%v\ngot\n%v", expectedResult, result)
++		}
++	})
++}
+-- 
+2.54.0.windows.1
+

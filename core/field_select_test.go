@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"testing"
 
+	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/core"
 	"github.com/pocketbase/pocketbase/tests"
 	"github.com/pocketbase/pocketbase/tools/types"
@@ -51,10 +52,18 @@ func TestSelectFieldColumnType(t *testing.T) {
 }
 
 func TestSelectFieldMySQLColumnType(t *testing.T) {
-	app, _ := tests.NewTestApp()
-	defer app.Cleanup()
-
 	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+
+	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
+		DBConnect: func(dbPath string) (*dbx.DB, error) {
+			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+			return dbx.Open("sqlite", dbPath+pragmas)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
 
 	scenarios := []struct {
 		name     string

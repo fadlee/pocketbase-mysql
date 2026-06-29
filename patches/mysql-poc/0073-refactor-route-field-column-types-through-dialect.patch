@@ -1,0 +1,467 @@
+From 80e550a1f39201ffe6e3fc30ad029cb2a315acb5 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:00:00 +0700
+Subject: [PATCH 73/93] refactor: route field column types through dialect
+
+---
+ core/db_dialect.go          | 82 ++++++++++++++++++++++++++++++++++---
+ core/field_autodate.go      |  6 +--
+ core/field_date.go          |  6 +--
+ core/field_editor.go        |  6 +--
+ core/field_email.go         |  6 +--
+ core/field_file.go          | 10 ++---
+ core/field_geo_point.go     | 12 ++----
+ core/field_password.go      |  6 +--
+ core/field_relation.go      | 10 ++---
+ core/field_relation_test.go | 15 +++++--
+ core/field_select.go        | 18 ++++----
+ core/field_select_test.go   | 15 +++++--
+ core/field_text.go          | 22 ++++------
+ core/field_url.go           |  6 +--
+ 14 files changed, 134 insertions(+), 86 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 9872972a..bcefe6dd 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -1,6 +1,7 @@
+ package core
+ 
+ import (
++	"fmt"
+ 	"os"
+ 	"strings"
+ )
+@@ -24,6 +25,20 @@ type Dialect interface {
+ 	Name() string
+ }
+ 
++// columnDialect is a local (unexported) capability interface that exposes
++// dialect-specific column type strings used by the field ColumnType methods.
++//
++// It is intentionally kept separate from the exported [Dialect] interface so
++// that the public surface stays minimal while the concrete dialect types can
++// still be type-asserted to provide column type information.
++type columnDialect interface {
++	VarCharColumnType(max int) string
++	PrimaryKeyColumnType() string
++	EditorColumnType() string
++	JSONArrayColumnType() string
++	JSONValueColumnType(defaultValue string) string
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -32,6 +47,36 @@ func (SQLiteDialect) Name() string {
+ 	return DialectSQLiteName
+ }
+ 
++// VarCharColumnType implements the [columnDialect] interface.
++//
++// SQLite has no VARCHAR type, so a TEXT column is returned regardless of max.
++func (SQLiteDialect) VarCharColumnType(max int) string {
++	return "TEXT DEFAULT '' NOT NULL"
++}
++
++// PrimaryKeyColumnType implements the [columnDialect] interface.
++func (SQLiteDialect) PrimaryKeyColumnType() string {
++	// note: the default is just a last resort fallback to avoid empty
++	// string values in case the record was inserted with raw sql and
++	// it is not actually used when operating with the db abstraction
++	return "TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL"
++}
++
++// EditorColumnType implements the [columnDialect] interface.
++func (SQLiteDialect) EditorColumnType() string {
++	return "TEXT DEFAULT '' NOT NULL"
++}
++
++// JSONArrayColumnType implements the [columnDialect] interface.
++func (SQLiteDialect) JSONArrayColumnType() string {
++	return "JSON DEFAULT '[]' NOT NULL"
++}
++
++// JSONValueColumnType implements the [columnDialect] interface.
++func (SQLiteDialect) JSONValueColumnType(defaultValue string) string {
++	return fmt.Sprintf("JSON DEFAULT '%s' NOT NULL", defaultValue)
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -40,6 +85,37 @@ func (MySQLDialect) Name() string {
+ 	return DialectMySQLName
+ }
+ 
++// VarCharColumnType implements the [columnDialect] interface.
++func (MySQLDialect) VarCharColumnType(max int) string {
++	return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
++}
++
++// PrimaryKeyColumnType implements the [columnDialect] interface.
++func (MySQLDialect) PrimaryKeyColumnType() string {
++	return "VARCHAR(15) PRIMARY KEY NOT NULL"
++}
++
++// EditorColumnType implements the [columnDialect] interface.
++func (MySQLDialect) EditorColumnType() string {
++	return "LONGTEXT NOT NULL"
++}
++
++// JSONArrayColumnType implements the [columnDialect] interface.
++//
++// MySQL disallows literal DEFAULT values on JSON columns, so no default is
++// specified; the zero value is supplied at the application layer.
++func (MySQLDialect) JSONArrayColumnType() string {
++	return "JSON NOT NULL"
++}
++
++// JSONValueColumnType implements the [columnDialect] interface.
++//
++// MySQL disallows literal DEFAULT values on JSON columns, so the defaultValue
++// is ignored and the zero value is supplied at the application layer.
++func (MySQLDialect) JSONValueColumnType(defaultValue string) string {
++	return "JSON NOT NULL"
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+@@ -68,9 +144,5 @@ func IsMySQLDataDB(app App) bool {
+ }
+ 
+ func jsonArrayColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "JSON NOT NULL"
+-	}
+-
+-	return "JSON DEFAULT '[]' NOT NULL"
++	return app.Dialect().(columnDialect).JSONArrayColumnType()
+ }
+diff --git a/core/field_autodate.go b/core/field_autodate.go
+index 29676f62..192e6a2a 100644
+--- a/core/field_autodate.go
++++ b/core/field_autodate.go
+@@ -106,11 +106,7 @@ func (f *AutodateField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *AutodateField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL" // note: sqlite doesn't allow adding new columns with non-constant defaults
++	return app.Dialect().(columnDialect).VarCharColumnType(255) // note: sqlite doesn't allow adding new columns with non-constant defaults
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_date.go b/core/field_date.go
+index 0f08b58b..0ca965bc 100644
+--- a/core/field_date.go
++++ b/core/field_date.go
+@@ -107,11 +107,7 @@ func (f *DateField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *DateField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL"
++	return app.Dialect().(columnDialect).VarCharColumnType(255)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_editor.go b/core/field_editor.go
+index fe951a11..a5ceb72a 100644
+--- a/core/field_editor.go
++++ b/core/field_editor.go
+@@ -114,11 +114,7 @@ func (f *EditorField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *EditorField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "LONGTEXT NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL"
++	return app.Dialect().(columnDialect).EditorColumnType()
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_email.go b/core/field_email.go
+index 90b2ffe0..221b2d51 100644
+--- a/core/field_email.go
++++ b/core/field_email.go
+@@ -110,11 +110,7 @@ func (f *EmailField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *EmailField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL"
++	return app.Dialect().(columnDialect).VarCharColumnType(255)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_file.go b/core/field_file.go
+index c62f2f2b..40ce2ba8 100644
+--- a/core/field_file.go
++++ b/core/field_file.go
+@@ -191,15 +191,13 @@ func (f *FileField) IsMultiple() bool {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *FileField) ColumnType(app App) string {
+-	if f.IsMultiple() {
+-		return jsonArrayColumnType(app)
+-	}
++	cd := app.Dialect().(columnDialect)
+ 
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
++	if f.IsMultiple() {
++		return cd.JSONArrayColumnType()
+ 	}
+ 
+-	return "TEXT DEFAULT '' NOT NULL"
++	return cd.VarCharColumnType(255)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_geo_point.go b/core/field_geo_point.go
+index a38d8957..7e41b79a 100644
+--- a/core/field_geo_point.go
++++ b/core/field_geo_point.go
+@@ -107,14 +107,10 @@ func (f *GeoPointField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *GeoPointField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		// MySQL disallows literal DEFAULT values on JSON columns; the zero
+-		// value ({"lon":0,"lat":0}) is supplied at the application layer
+-		// (see PrepareValue), mirroring jsonArrayColumnType.
+-		return "JSON NOT NULL"
+-	}
+-
+-	return `JSON DEFAULT '{"lon":0,"lat":0}' NOT NULL`
++	// MySQL disallows literal DEFAULT values on JSON columns; the zero
++	// value ({"lon":0,"lat":0}) is supplied at the application layer
++	// (see PrepareValue), mirroring jsonArrayColumnType.
++	return app.Dialect().(columnDialect).JSONValueColumnType(`{"lon":0,"lat":0}`)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_password.go b/core/field_password.go
+index d906e499..82a684f7 100644
+--- a/core/field_password.go
++++ b/core/field_password.go
+@@ -144,11 +144,7 @@ func (f *PasswordField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *PasswordField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL"
++	return app.Dialect().(columnDialect).VarCharColumnType(255)
+ }
+ 
+ // DriverValue implements the [DriverValuer] interface.
+diff --git a/core/field_relation.go b/core/field_relation.go
+index 97140abd..7c51d20c 100644
+--- a/core/field_relation.go
++++ b/core/field_relation.go
+@@ -154,15 +154,13 @@ func (f *RelationField) IsMultiple() bool {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *RelationField) ColumnType(app App) string {
+-	if f.IsMultiple() {
+-		return jsonArrayColumnType(app)
+-	}
++	cd := app.Dialect().(columnDialect)
+ 
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(15) DEFAULT '' NOT NULL"
++	if f.IsMultiple() {
++		return cd.JSONArrayColumnType()
+ 	}
+ 
+-	return "TEXT DEFAULT '' NOT NULL"
++	return cd.VarCharColumnType(15)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_relation_test.go b/core/field_relation_test.go
+index ce4c6490..00e15b71 100644
+--- a/core/field_relation_test.go
++++ b/core/field_relation_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"testing"
+ 
++	"github.com/pocketbase/dbx"
+ 	"github.com/pocketbase/pocketbase/core"
+ 	"github.com/pocketbase/pocketbase/tests"
+ 	"github.com/pocketbase/pocketbase/tools/types"
+@@ -51,11 +52,19 @@ func TestRelationFieldColumnType(t *testing.T) {
+ }
+ 
+ func TestRelationFieldMySQLColumnType(t *testing.T) {
+-	app, _ := tests.NewTestApp()
+-	defer app.Cleanup()
+-
+ 	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+ 
++	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
++		DBConnect: func(dbPath string) (*dbx.DB, error) {
++			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
++			return dbx.Open("sqlite", dbPath+pragmas)
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer app.Cleanup()
++
+ 	scenarios := []struct {
+ 		name     string
+ 		field    *core.RelationField
+diff --git a/core/field_select.go b/core/field_select.go
+index 0ec2a07a..f0f6a6fd 100644
+--- a/core/field_select.go
++++ b/core/field_select.go
+@@ -3,7 +3,6 @@ package core
+ import (
+ 	"context"
+ 	"database/sql/driver"
+-	"fmt"
+ 	"slices"
+ 
+ 	validation "github.com/go-ozzo/ozzo-validation/v4"
+@@ -142,21 +141,20 @@ func (f *SelectField) IsMultiple() bool {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *SelectField) ColumnType(app App) string {
++	cd := app.Dialect().(columnDialect)
++
+ 	if f.IsMultiple() {
+-		return jsonArrayColumnType(app)
++		return cd.JSONArrayColumnType()
+ 	}
+ 
+-	if isMySQLDataDB(app) {
+-		max := 1
+-		for _, value := range f.Values {
+-			if len(value) > max {
+-				max = len(value)
+-			}
++	max := 1
++	for _, value := range f.Values {
++		if len(value) > max {
++			max = len(value)
+ 		}
+-		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
+ 	}
+ 
+-	return "TEXT DEFAULT '' NOT NULL"
++	return cd.VarCharColumnType(max)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_select_test.go b/core/field_select_test.go
+index 900a08a0..765fc26a 100644
+--- a/core/field_select_test.go
++++ b/core/field_select_test.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 	"testing"
+ 
++	"github.com/pocketbase/dbx"
+ 	"github.com/pocketbase/pocketbase/core"
+ 	"github.com/pocketbase/pocketbase/tests"
+ 	"github.com/pocketbase/pocketbase/tools/types"
+@@ -51,11 +52,19 @@ func TestSelectFieldColumnType(t *testing.T) {
+ }
+ 
+ func TestSelectFieldMySQLColumnType(t *testing.T) {
+-	app, _ := tests.NewTestApp()
+-	defer app.Cleanup()
+-
+ 	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+ 
++	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
++		DBConnect: func(dbPath string) (*dbx.DB, error) {
++			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
++			return dbx.Open("sqlite", dbPath+pragmas)
++		},
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer app.Cleanup()
++
+ 	scenarios := []struct {
+ 		name     string
+ 		field    *core.SelectField
+diff --git a/core/field_text.go b/core/field_text.go
+index 7c8238fe..605a4892 100644
+--- a/core/field_text.go
++++ b/core/field_text.go
+@@ -160,26 +160,18 @@ func (f *TextField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *TextField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		if f.PrimaryKey {
+-			return "VARCHAR(15) PRIMARY KEY NOT NULL"
+-		}
++	cd := app.Dialect().(columnDialect)
+ 
+-		max := f.Max
+-		if max <= 0 {
+-			max = 255
+-		}
+-		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
++	if f.PrimaryKey {
++		return cd.PrimaryKeyColumnType()
+ 	}
+ 
+-	if f.PrimaryKey {
+-		// note: the default is just a last resort fallback to avoid empty
+-		// string values in case the record was inserted with raw sql and
+-		// it is not actually used when operating with the db abstraction
+-		return "TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL"
++	max := f.Max
++	if max <= 0 {
++		max = 255
+ 	}
+ 
+-	return "TEXT DEFAULT '' NOT NULL"
++	return cd.VarCharColumnType(max)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+diff --git a/core/field_url.go b/core/field_url.go
+index a3060463..801c33f4 100644
+--- a/core/field_url.go
++++ b/core/field_url.go
+@@ -110,11 +110,7 @@ func (f *URLField) SetHidden(hidden bool) {
+ 
+ // ColumnType implements [Field.ColumnType] interface method.
+ func (f *URLField) ColumnType(app App) string {
+-	if isMySQLDataDB(app) {
+-		return "VARCHAR(255) DEFAULT '' NOT NULL"
+-	}
+-
+-	return "TEXT DEFAULT '' NOT NULL"
++	return app.Dialect().(columnDialect).VarCharColumnType(255)
+ }
+ 
+ // PrepareValue implements [Field.PrepareValue] interface method.
+-- 
+2.54.0.windows.1
+

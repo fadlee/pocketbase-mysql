@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"database/sql/driver"
-	"fmt"
 	"slices"
 
 	validation "github.com/go-ozzo/ozzo-validation/v4"
@@ -142,21 +141,20 @@ func (f *SelectField) IsMultiple() bool {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *SelectField) ColumnType(app App) string {
+	cd := app.Dialect().(columnDialect)
+
 	if f.IsMultiple() {
-		return jsonArrayColumnType(app)
+		return cd.JSONArrayColumnType()
 	}
 
-	if isMySQLDataDB(app) {
-		max := 1
-		for _, value := range f.Values {
-			if len(value) > max {
-				max = len(value)
-			}
+	max := 1
+	for _, value := range f.Values {
+		if len(value) > max {
+			max = len(value)
 		}
-		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
 	}
 
-	return "TEXT DEFAULT '' NOT NULL"
+	return cd.VarCharColumnType(max)
 }
 
 // PrepareValue implements [Field.PrepareValue] interface method.

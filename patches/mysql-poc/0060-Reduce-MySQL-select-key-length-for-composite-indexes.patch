@@ -1,7 +1,7 @@
 From b46df7cd47393857826d3481c10c5f25c60cb583 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Sat, 27 Jun 2026 14:46:42 +0700
-Subject: [PATCH 60/60] Reduce MySQL select key length for composite indexes
+Subject: [PATCH 60/93] Reduce MySQL select key length for composite indexes
 
 ---
  core/field_select.go         |  9 ++++++++-

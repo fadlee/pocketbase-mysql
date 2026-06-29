@@ -154,15 +154,13 @@ func (f *RelationField) IsMultiple() bool {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *RelationField) ColumnType(app App) string {
+	cd := app.Dialect().(columnDialect)
+
 	if f.IsMultiple() {
-		return jsonArrayColumnType(app)
+		return cd.JSONArrayColumnType()
 	}
 
-	if isMySQLDataDB(app) {
-		return "VARCHAR(15) DEFAULT '' NOT NULL"
-	}
-
-	return "TEXT DEFAULT '' NOT NULL"
+	return cd.VarCharColumnType(15)
 }
 
 // PrepareValue implements [Field.PrepareValue] interface method.

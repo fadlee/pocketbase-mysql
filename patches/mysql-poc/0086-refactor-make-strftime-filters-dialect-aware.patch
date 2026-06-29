@@ -1,0 +1,669 @@
+From 0a49ef1014b3a22f91914c459be3eca4a679c841 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 13:25:58 +0700
+Subject: [PATCH 86/93] refactor: make strftime filters dialect-aware
+
+---
+ core/db_dialect.go                    | 154 ++++++++++++++++++++++++++
+ core/record_field_resolver.go         |  16 +++
+ scripts/mysql-runtime-qa.mjs          |  47 ++++----
+ tools/search/filter.go                |   2 +-
+ tools/search/multi_match_subquery.go  |  21 ++++
+ tools/search/simple_field_resolver.go |  35 ++++++
+ tools/search/token_functions.go       | 144 +++++++++++++++++++-----
+ tools/search/token_functions_test.go  |   8 +-
+ 8 files changed, 368 insertions(+), 59 deletions(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index fca8fc95..a9369a7b 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -8,6 +8,7 @@ import (
+ 	"github.com/pocketbase/dbx"
+ 	"github.com/pocketbase/pocketbase/tools/dbutils"
+ 	"github.com/pocketbase/pocketbase/tools/search"
++	"github.com/pocketbase/pocketbase/tools/security"
+ )
+ 
+ const (
+@@ -150,6 +151,26 @@ type jsonExtractDialect interface {
+ 	JSONExtractExpr(column string, path string) string
+ }
+ 
++// strftimeDialect is a local (unexported) capability interface that
++// exposes dialect-specific strftime expression generation.
++//
++// It is intentionally kept separate from the exported [Dialect] interface
++// so that the public surface stays minimal while the concrete dialect types
++// can be type-asserted to provide strftime expressions.
++type strftimeDialect interface {
++	// StrftimeExpr returns a dialect-specific SQL expression for the
++	// strftime token function, given the resolved arguments.
++	//
++	// args[0] is the format string (TokenText).
++	// args[1] is the time value (TokenText, TokenIdentifier, or TokenNumber).
++	// args[2:] are modifiers (TokenText).
++	//
++	// The returned expression string is used as the ResolverResult.Identifier.
++	// The returned params map is merged into the ResolverResult.Params.
++	// An error is returned for unsupported modifiers or format tokens.
++	StrftimeExpr(args []search.TokenFunctionArg) (expr string, params dbx.Params, err error)
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -296,6 +317,18 @@ func (SQLiteDialect) JSONExtractExpr(column string, path string) string {
+ 	return dbutils.JSONExtract(column, path)
+ }
+ 
++// StrftimeExpr implements the [strftimeDialect] interface.
++//
++// Returns the SQLite strftime expression using the resolved argument
++// identifiers (placeholders and column references).
++func (SQLiteDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
++	identifiers := make([]string, 0, len(args))
++	for _, arg := range args {
++		identifiers = append(identifiers, arg.Result.Identifier)
++	}
++	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -499,6 +532,127 @@ func (MySQLDialect) JSONExtractExpr(column string, path string) string {
+ 	)
+ }
+ 
++// StrftimeExpr implements the [strftimeDialect] interface.
++//
++// MySQL doesn't have strftime(). This implementation translates the SQLite
++// format string to MySQL DATE_FORMAT tokens and wraps the time value
++// appropriately.
++//
++// Format token mapping:
++//   %Y → %Y (4-digit year)
++//   %m → %m (2-digit month)
++//   %d → %d (2-digit day)
++//   %H → %H (2-digit hour 24h)
++//   %M → %i (2-digit minute — SQLite %M is minutes, MySQL %M is month name)
++//   %S → %s (2-digit second)
++//   %f → %f (fractional seconds — MySQL returns 6 digits, SQLite returns 3)
++//
++// Supported modifiers:
++//   unixepoch — wraps time value with FROM_UNIXTIME()
++//   utc       — no-op (PocketBase stores UTC strings)
++//
++// Unsupported modifiers (localtime, timezone offsets, relative date math)
++// return an error.
++//
++// The 'Z' suffix in datetime strings is handled by REPLACE(timeValue, 'Z', '')
++// because MySQL's DATE_FORMAT doesn't parse the 'Z' suffix.
++func (MySQLDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
++	if len(args) < 1 {
++		return "", nil, fmt.Errorf("expected at least 1 argument")
++	}
++
++	// extract format string from the first argument's literal
++	formatStr := args[0].Literal
++
++	// translate SQLite format tokens to MySQL DATE_FORMAT tokens
++	mappedFormat := translateStrftimeFormat(formatStr)
++
++	// create a new placeholder for the translated format
++	formatPlaceholder := "strftimeFmt" + security.PseudorandomString(8)
++	params := dbx.Params{formatPlaceholder: mappedFormat}
++
++	// strftime(format) — no time value
++	if len(args) == 1 {
++		expr := fmt.Sprintf("DATE_FORMAT(UTC_TIMESTAMP(3), {:%s})", formatPlaceholder)
++		return expr, params, nil
++	}
++
++	// extract time value identifier
++	timeValueIdentifier := args[1].Result.Identifier
++
++	// process modifiers
++	hasUnixepoch := false
++	for i := 2; i < len(args); i++ {
++		mod := strings.ToLower(strings.TrimSpace(args[i].Literal))
++		switch mod {
++		case "unixepoch":
++			hasUnixepoch = true
++		case "utc":
++			// no-op, PocketBase stores UTC strings
++		case "localtime":
++			return "", nil, fmt.Errorf("[strftime] unsupported MySQL modifier %q", mod)
++		default:
++			return "", nil, fmt.Errorf("[strftime] unsupported MySQL modifier %q", mod)
++		}
++	}
++
++	// build the time value expression
++	var timeValueExpr string
++	if hasUnixepoch {
++		// numeric Unix seconds → FROM_UNIXTIME
++		timeValueExpr = fmt.Sprintf("FROM_UNIXTIME(%s)", timeValueIdentifier)
++	} else {
++		// datetime string — remove 'Z' suffix for MySQL compatibility
++		timeValueExpr = fmt.Sprintf("REPLACE(%s, 'Z', '')", timeValueIdentifier)
++	}
++
++	expr := fmt.Sprintf("DATE_FORMAT(%s, {:%s})", timeValueExpr, formatPlaceholder)
++	return expr, params, nil
++}
++
++// translateStrftimeFormat converts SQLite strftime format tokens to MySQL
++// DATE_FORMAT tokens.
++//
++// The only token that MUST be translated is %M (SQLite minutes → MySQL %i).
++// Other tokens are either identical or have compatible behavior.
++//
++// %f (fractional seconds) is left as %f. MySQL returns 6-digit microseconds
++// while SQLite returns 3-digit milliseconds. This is a documented behavior
++// difference.
++func translateStrftimeFormat(format string) string {
++	// We need to translate %M → %i but NOT touch %%M or other escaped sequences.
++	// SQLite uses %% for a literal %.
++	var result strings.Builder
++	i := 0
++	for i < len(format) {
++		if format[i] == '%' && i+1 < len(format) {
++			next := format[i+1]
++			if next == '%' {
++				// literal %, skip both characters
++				result.WriteString("%%")
++				i += 2
++				continue
++			}
++			if next == 'M' {
++				// SQLite %M = minutes → MySQL %i
++				result.WriteString("%i")
++			} else if next == 'S' {
++				// SQLite %S = seconds → MySQL %s (lowercase)
++				result.WriteString("%s")
++			} else {
++				// all other tokens are identical or compatible
++				result.WriteByte('%')
++				result.WriteByte(next)
++			}
++			i += 2
++		} else {
++			result.WriteByte(format[i])
++			i++
++		}
++	}
++	return result.String()
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index b5dbfe68..776dac74 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -142,6 +142,22 @@ func (r *RecordFieldResolver) RowidSortExpr(direction string) (string, error) {
+ 	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
+ }
+ 
++// StrftimeExpr implements the [search.strftimeResolver] interface.
++//
++// It delegates to the dialect's StrftimeExpr method if available, or
++// returns an error if the dialect doesn't support strftime.
++func (r *RecordFieldResolver) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
++	if d, ok := r.app.Dialect().(strftimeDialect); ok {
++		return d.StrftimeExpr(args)
++	}
++	// fallback for tests without a real dialect — use SQLite expression
++	identifiers := make([]string, 0, len(args))
++	for _, arg := range args {
++		identifiers = append(identifiers, arg.Result.Identifier)
++	}
++	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
++}
++
+ // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
+ func NewRecordFieldResolver(
+ 	app App,
+diff --git a/scripts/mysql-runtime-qa.mjs b/scripts/mysql-runtime-qa.mjs
+index 37f35551..090802e4 100644
+--- a/scripts/mysql-runtime-qa.mjs
++++ b/scripts/mysql-runtime-qa.mjs
+@@ -1573,45 +1573,36 @@ class QA {
+     await this.createRecord("qa_strftime", { when: "2026-01-15 10:30:00.000Z" });
+     await this.createRecord("qa_strftime", { when: "2026-06-20 14:45:00.000Z" });
+ 
+-    // --- Test strftime filter (currently fails on MySQL) ---
+-    // strftime token function has no MySQL handling — it generates
+-    // strftime() which doesn't exist in MySQL.
++    // --- Test strftime filter (now works on MySQL) ---
+     {
+-      const err = await expectStatus(
+-        "strftime year filter on MySQL (expected 400 — no MySQL strftime)",
+-        400,
+-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y', when)='2026'")}`)
+-      );
+-      this.log("Strftime spike: strftime('%Y', when) filter fails with 400 (no MySQL strftime) — confirmed");
++      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y', when)='2026'")}`, { token: true });
++      const items = res.items || [];
++      this.assert(items.length === 2, `expected 2 records with strftime('%Y', when)='2026', got ${items.length}`);
++      this.log("Strftime spike: strftime('%Y', when) filter works — returns 2 records");
+     }
+ 
+     {
+-      const err = await expectStatus(
+-        "strftime month filter on MySQL (expected 400)",
+-        400,
+-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%m', when)='01'")}`)
+-      );
+-      this.log("Strftime spike: strftime('%m', when) filter fails with 400 — confirmed");
++      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%m', when)='01'")}`, { token: true });
++      const items = res.items || [];
++      this.assert(items.length === 1, `expected 1 record with strftime('%m', when)='01', got ${items.length}`);
++      this.assert(items[0].when.startsWith("2026-01"), `expected January record, got ${items[0].when}`);
++      this.log("Strftime spike: strftime('%m', when) filter works — returns January record");
+     }
+ 
+     // --- Test strftime with format string containing time tokens ---
+     {
+-      const err = await expectStatus(
+-        "strftime full datetime filter on MySQL (expected 400)",
+-        400,
+-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y-%m-%d %H:%M:%S', when)='2026-01-15 10:30:00'")}`)
+-      );
+-      this.log("Strftime spike: full datetime format fails with 400 — confirmed");
++      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y-%m-%d %H:%M:%S', when)='2026-01-15 10:30:00'")}`, { token: true });
++      const items = res.items || [];
++      this.assert(items.length === 1, `expected 1 record with full datetime match, got ${items.length}`);
++      this.log("Strftime spike: full datetime format filter works — returns matching record");
+     }
+ 
+     this.log("Strftime spike findings:");
+-    this.log("  1. strftime filter fails — token function has no MySQL handling");
+-    this.log("  2. MySQL translation: strftime() → DATE_FORMAT()");
+-    this.log("  3. Critical token mappings: %M→%i (minutes), %S→%s (seconds)");
+-    this.log("  4. Datetime parsing: SQLite accepts 'Z' suffix, MySQL needs REPLACE/STR_TO_DATE");
+-    this.log("  5. unixepoch modifier: SQLite uses modifier, MySQL needs FROM_UNIXTIME()");
+-    this.log("  6. Fix: Task 8.1 will implement StrftimeExpr dialect method");
+-    this.log("Strftime spike: PASSED (findings documented)");
++    this.log("  1. strftime filter works — StrftimeExpr generates MySQL DATE_FORMAT expression");
++    this.log("  2. Format tokens translated: %M→%i (minutes), %S→%s (seconds)");
++    this.log("  3. 'Z' suffix handled via REPLACE(timeValue, 'Z', '')");
++    this.log("  4. unixepoch modifier supported via FROM_UNIXTIME()");
++    this.log("Strftime spike: PASSED (strftime works on MySQL)");
+   }
+ 
+   // =========================================================================
+diff --git a/tools/search/filter.go b/tools/search/filter.go
+index 9dcbb21e..8063340b 100644
+--- a/tools/search/filter.go
++++ b/tools/search/filter.go
+@@ -380,7 +380,7 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
+ 		}
+ 
+ 		args, _ := token.Meta.([]fexpr.Token)
+-		return fn(func(argToken fexpr.Token) (*ResolverResult, error) {
++		return fn(fieldResolver, func(argToken fexpr.Token) (*ResolverResult, error) {
+ 			return resolveToken(argToken, fieldResolver)
+ 		}, args...)
+ 	}
+diff --git a/tools/search/multi_match_subquery.go b/tools/search/multi_match_subquery.go
+index 4617a2d9..98f83020 100644
+--- a/tools/search/multi_match_subquery.go
++++ b/tools/search/multi_match_subquery.go
+@@ -9,6 +9,27 @@ import (
+ 
+ var _ dbx.Expression = (*MultiMatchSubquery)(nil)
+ 
++// cloneMultiMatchSubquery creates a shallow copy of the MultiMatchSubquery
++// with cloned Params and Joins slice, so that mutations to the clone's
++// ValueIdentifier, Params, or Joins do not affect the original.
++//
++// The individual Join entries are shared (not deep-copied) because join
++// definitions are not mutated after creation.
++func cloneMultiMatchSubquery(m *MultiMatchSubquery) *MultiMatchSubquery {
++	clone := *m
++	if m.Params != nil {
++		clone.Params = make(dbx.Params, len(m.Params))
++		for k, v := range m.Params {
++			clone.Params[k] = v
++		}
++	}
++	if m.Joins != nil {
++		clone.Joins = make([]*Join, len(m.Joins))
++		copy(clone.Joins, m.Joins)
++	}
++	return &clone
++}
++
+ // Join defines common fields required for a single SQL JOIN clause.
+ //
+ // When RawTableExpr is true, TableName is treated as a raw SQL table
+diff --git a/tools/search/simple_field_resolver.go b/tools/search/simple_field_resolver.go
+index f19600c7..c787ced8 100644
+--- a/tools/search/simple_field_resolver.go
++++ b/tools/search/simple_field_resolver.go
+@@ -5,6 +5,7 @@ import (
+ 	"strconv"
+ 	"strings"
+ 
++	"github.com/ganigeorgiev/fexpr"
+ 	"github.com/pocketbase/dbx"
+ 	"github.com/pocketbase/pocketbase/tools/inflector"
+ 	"github.com/pocketbase/pocketbase/tools/list"
+@@ -57,6 +58,40 @@ type FieldResolver interface {
+ 	Resolve(field string) (*ResolverResult, error)
+ }
+ 
++// TokenFunctionArg represents a single resolved argument to a token function.
++//
++// The Token field carries the original parsed token type (e.g. fexpr.TokenText,
++// fexpr.TokenNumber, fexpr.TokenIdentifier) so that dialect implementations
++// can make decisions based on the argument shape rather than inferring types
++// from the resolved SQL identifier string.
++//
++// The Literal field carries the raw token literal as provided by the filter
++// expression parser (e.g. the format string "%Y-%m-%d" or the modifier
++// "unixepoch").
++//
++// The Result field carries the resolved ResolverResult for the argument
++// (Identifier, Params, MultiMatchSubQuery, etc.).
++type TokenFunctionArg struct {
++	Token   fexpr.TokenType
++	Literal string
++	Result  *ResolverResult
++}
++
++// strftimeResolver is an optional capability interface that resolvers can
++// implement to provide dialect-specific strftime expression generation.
++//
++// When a resolver does not implement this interface, the SQLite/default
++// strftime expression is used.
++type strftimeResolver interface {
++	// StrftimeExpr returns a dialect-specific SQL expression for the
++	// strftime token function, given the resolved arguments.
++	//
++	// The returned expression string is used as the ResolverResult.Identifier.
++	// The returned params map is merged into the ResolverResult.Params.
++	// An error is returned for unsupported modifiers or format tokens.
++	StrftimeExpr(args []TokenFunctionArg) (expr string, params dbx.Params, err error)
++}
++
+ // NewSimpleFieldResolver creates a new `SimpleFieldResolver` with the
+ // provided `allowedFields`.
+ //
+diff --git a/tools/search/token_functions.go b/tools/search/token_functions.go
+index 1fc5449a..483023b9 100644
+--- a/tools/search/token_functions.go
++++ b/tools/search/token_functions.go
+@@ -10,10 +10,21 @@ import (
+ 	"github.com/pocketbase/dbx"
+ )
+ 
+-var TokenFunctions = map[string]func(
++// TokenFunction is the callable shape for all registered token functions.
++//
++// The fieldResolver parameter provides access to the resolver (and through
++// it, dialect capabilities) so that token functions can generate
++// dialect-specific SQL expressions.
++//
++// The argTokenResolverFunc parameter is a closure that resolves individual
++// argument tokens to ResolverResults.
++type TokenFunction func(
++	fieldResolver FieldResolver,
+ 	argTokenResolverFunc func(fexpr.Token) (*ResolverResult, error),
+ 	args ...fexpr.Token,
+-) (*ResolverResult, error){
++) (*ResolverResult, error)
++
++var TokenFunctions = map[string]TokenFunction{
+ 	// geoDistance(lonA, latA, lonB, latB) calculates the Haversine
+ 	// distance between 2 points in kilometres (https://www.movable-type.co.uk/scripts/latlong.html).
+ 	//
+@@ -25,7 +36,7 @@ var TokenFunctions = map[string]func(
+ 	// Or in other words, if a collection has "orgs" multiple relation field pointing to "orgs" collection that has "office" as "geoPoint" field,
+ 	// then the filter: `geoDistance(orgs.office.lon, orgs.office.lat, 1, 2) < 200`
+ 	// will evaluate to true if for at-least-one of the "orgs.office" records the function result in a value satisfying the condition (aka. "result < 200").
+-	"geoDistance": func(argTokenResolverFunc func(fexpr.Token) (*ResolverResult, error), args ...fexpr.Token) (*ResolverResult, error) {
++	"geoDistance": func(fieldResolver FieldResolver, argTokenResolverFunc func(fexpr.Token) (*ResolverResult, error), args ...fexpr.Token) (*ResolverResult, error) {
+ 		if len(args) != 4 {
+ 			return nil, fmt.Errorf("[geoDistance] expected 4 arguments, got %d", len(args))
+ 		}
+@@ -78,20 +89,18 @@ var TokenFunctions = map[string]func(
+ 	//
+ 	// A multi-match constraint will be also applied in case the time-value
+ 	// is an identifier as a result of a multi-value relation field.
+-	"strftime": func(argTokenResolverFunc func(fexpr.Token) (*ResolverResult, error), args ...fexpr.Token) (*ResolverResult, error) {
++	"strftime": func(fieldResolver FieldResolver, argTokenResolverFunc func(fexpr.Token) (*ResolverResult, error), args ...fexpr.Token) (*ResolverResult, error) {
+ 		totalArgs := len(args)
+ 
+ 		if totalArgs < 1 {
+ 			return nil, fmt.Errorf("[strftime] expected at least 1 arguments, got %d", len(args))
+ 		}
+ 
+-		// limit the number of arguments to prevent abuse
+ 		if totalArgs > 10 {
+ 			return nil, fmt.Errorf("[strftime] too many arguments (max allowed 10, got %d)", totalArgs)
+ 		}
+ 
+ 		// format arg
+-		// -----------------------------------------------------------
+ 		if args[0].Type != fexpr.TokenText {
+ 			return nil, errors.New("[strftime] expects the first argument to be a format string")
+ 		}
+@@ -101,15 +110,38 @@ var TokenFunctions = map[string]func(
+ 			return nil, fmt.Errorf("[strftime] failed to resolve format argument: %w", err)
+ 		}
+ 
+-		// no further arguments
++		// no further arguments → strftime(format)
+ 		if totalArgs == 1 {
+-			formatArgResult.NullFallback = NullFallbackEnforced
+-			formatArgResult.Identifier = "strftime(" + formatArgResult.Identifier + ")"
+-			return formatArgResult, nil
++			result := &ResolverResult{
++				NullFallback: NullFallbackEnforced,
++				Identifier:   "strftime(" + formatArgResult.Identifier + ")",
++				Params:       dbx.Params{},
++			}
++			if err = concatUniqueParams(result.Params, formatArgResult.Params); err != nil {
++				return nil, err
++			}
++
++			// try dialect-specific expression
++			if sr, ok := fieldResolver.(strftimeResolver); ok {
++				dialectArgs := []TokenFunctionArg{
++					{Token: args[0].Type, Literal: args[0].Literal, Result: formatArgResult},
++				}
++				expr, dparams, derr := sr.StrftimeExpr(dialectArgs)
++				if derr != nil {
++					return nil, fmt.Errorf("[strftime] %w", derr)
++				}
++				result.Identifier = expr
++				if dparams != nil {
++					if err = concatUniqueParams(result.Params, dparams); err != nil {
++						return nil, err
++					}
++				}
++			}
++
++			return result, nil
+ 		}
+ 
+ 		// time-value arg
+-		// -----------------------------------------------------------
+ 		allowedTimeValueTokens := []fexpr.TokenType{fexpr.TokenText, fexpr.TokenIdentifier, fexpr.TokenNumber}
+ 		if !slices.Contains(allowedTimeValueTokens, args[1].Type) {
+ 			return nil, errors.New("[strftime] expects the second argument to be of a valid time-value type")
+@@ -121,7 +153,6 @@ var TokenFunctions = map[string]func(
+ 		}
+ 
+ 		// modifiers args
+-		// -----------------------------------------------------------
+ 		resolvedModifierArgs := make([]*ResolverResult, totalArgs-2)
+ 		for i, arg := range args[2:] {
+ 			if arg.Type != fexpr.TokenText {
+@@ -136,43 +167,104 @@ var TokenFunctions = map[string]func(
+ 			resolvedModifierArgs[i] = resolved
+ 		}
+ 
++		// build TokenFunctionArg slice for dialect
++		dialectArgs := make([]TokenFunctionArg, totalArgs)
++		dialectArgs[0] = TokenFunctionArg{Token: args[0].Type, Literal: args[0].Literal, Result: formatArgResult}
++		dialectArgs[1] = TokenFunctionArg{Token: args[1].Type, Literal: args[1].Literal, Result: timeValueArgResult}
++		for i, m := range resolvedModifierArgs {
++			dialectArgs[i+2] = TokenFunctionArg{Token: args[i+2].Type, Literal: args[i+2].Literal, Result: m}
++		}
++
+ 		// generating new ResolverResult
+-		// -----------------------------------------------------------
+ 		result := &ResolverResult{
+ 			NullFallback: NullFallbackEnforced,
+ 			Params:       dbx.Params{},
+ 		}
+ 
+-		identifiers := make([]string, 0, totalArgs)
+-
+-		identifiers = append(identifiers, formatArgResult.Identifier)
++		// merge all params
+ 		if err = concatUniqueParams(result.Params, formatArgResult.Params); err != nil {
+ 			return nil, err
+ 		}
+-
+-		identifiers = append(identifiers, timeValueArgResult.Identifier)
+ 		if err = concatUniqueParams(result.Params, timeValueArgResult.Params); err != nil {
+ 			return nil, err
+ 		}
+-
+ 		for _, m := range resolvedModifierArgs {
+-			identifiers = append(identifiers, m.Identifier)
+-			err = concatUniqueParams(result.Params, m.Params)
+-			if err != nil {
++			if err = concatUniqueParams(result.Params, m.Params); err != nil {
+ 				return nil, err
+ 			}
+ 		}
+ 
++		// try dialect-specific expression
++		if sr, ok := fieldResolver.(strftimeResolver); ok {
++			expr, dparams, derr := sr.StrftimeExpr(dialectArgs)
++			if derr != nil {
++				return nil, fmt.Errorf("[strftime] %w", derr)
++			}
++			result.Identifier = expr
++			if dparams != nil {
++				if err = concatUniqueParams(result.Params, dparams); err != nil {
++					return nil, err
++				}
++			}
++
++			// multi-match: call StrftimeExpr with multi-match time value
++			if timeValueArgResult.MultiMatchSubQuery != nil {
++				mmArgs := make([]TokenFunctionArg, len(dialectArgs))
++				copy(mmArgs, dialectArgs)
++				mmArgs[1] = TokenFunctionArg{
++					Token:   dialectArgs[1].Token,
++					Literal: dialectArgs[1].Literal,
++					Result: &ResolverResult{
++						Identifier:         timeValueArgResult.MultiMatchSubQuery.ValueIdentifier,
++						Params:             timeValueArgResult.MultiMatchSubQuery.Params,
++						MultiMatchSubQuery: nil,
++					},
++				}
++
++				mmExpr, mmParams, mmErr := sr.StrftimeExpr(mmArgs)
++				if mmErr != nil {
++					return nil, fmt.Errorf("[strftime] multi-match: %w", mmErr)
++				}
++
++				// clone MultiMatchSubQuery before mutating
++				mmClone := cloneMultiMatchSubquery(timeValueArgResult.MultiMatchSubQuery)
++				mmClone.ValueIdentifier = mmExpr
++				result.MultiMatchSubQuery = mmClone
++
++				if mmParams != nil {
++					if err = concatUniqueParams(mmClone.Params, mmParams); err != nil {
++						return nil, err
++					}
++					if err = concatUniqueParams(result.Params, mmParams); err != nil {
++						return nil, err
++					}
++				}
++			}
++
++			return result, nil
++		}
++
++		// SQLite/default fallback (clone-safe)
++		identifiers := make([]string, 0, totalArgs)
++		identifiers = append(identifiers, formatArgResult.Identifier)
++		identifiers = append(identifiers, timeValueArgResult.Identifier)
++		for _, m := range resolvedModifierArgs {
++			identifiers = append(identifiers, m.Identifier)
++		}
++
+ 		result.Identifier = "strftime(" + strings.Join(identifiers, ",") + ")"
+ 
+ 		if timeValueArgResult.MultiMatchSubQuery != nil {
++			// clone MultiMatchSubQuery before mutating
++			mmClone := cloneMultiMatchSubquery(timeValueArgResult.MultiMatchSubQuery)
++
+ 			// replace the regular time-value identifier with the multi-match one
+ 			identifiers[1] = timeValueArgResult.MultiMatchSubQuery.ValueIdentifier
+-			result.MultiMatchSubQuery = timeValueArgResult.MultiMatchSubQuery
+-			result.MultiMatchSubQuery.ValueIdentifier = "strftime(" + strings.Join(identifiers, ",") + ")"
++			mmClone.ValueIdentifier = "strftime(" + strings.Join(identifiers, ",") + ")"
+ 
+-			err = concatUniqueParams(result.MultiMatchSubQuery.Params, result.Params)
+-			if err != nil {
++			result.MultiMatchSubQuery = mmClone
++
++			if err = concatUniqueParams(mmClone.Params, result.Params); err != nil {
+ 				return nil, err
+ 			}
+ 		}
+diff --git a/tools/search/token_functions_test.go b/tools/search/token_functions_test.go
+index fa9ed6a4..77950483 100644
+--- a/tools/search/token_functions_test.go
++++ b/tools/search/token_functions_test.go
+@@ -152,7 +152,7 @@ func TestTokenFunctionsGeoDistance(t *testing.T) {
+ 
+ 	for _, s := range scenarios {
+ 		t.Run(s.name, func(t *testing.T) {
+-			result, err := fn(s.resolver, s.args...)
++			result, err := fn(nil, s.resolver, s.args...)
+ 
+ 			hasErr := err != nil
+ 			if hasErr != s.expectErr {
+@@ -178,7 +178,7 @@ func TestTokenFunctionsGeoDistanceExec(t *testing.T) {
+ 		t.Error("Expected geoDistance token function to be registered.")
+ 	}
+ 
+-	result, err := fn(
++	result, err := fn(nil,
+ 		func(t fexpr.Token) (*ResolverResult, error) {
+ 			placeholder := "t" + security.PseudorandomString(5)
+ 			return &ResolverResult{Identifier: "{:" + placeholder + "}", Params: map[string]any{placeholder: t.Literal}}, nil
+@@ -498,7 +498,7 @@ func TestTokenFunctionsStrftime(t *testing.T) {
+ 
+ 	for _, s := range scenarios {
+ 		t.Run(s.name, func(t *testing.T) {
+-			result, err := fn(s.resolver, s.args...)
++			result, err := fn(nil, s.resolver, s.args...)
+ 
+ 			hasErr := err != nil
+ 			if hasErr != s.expectErr {
+@@ -524,7 +524,7 @@ func TestTokenFunctionsStrftimeExec(t *testing.T) {
+ 		t.Error("Expected strftime token function to be registered.")
+ 	}
+ 
+-	result, err := fn(
++	result, err := fn(nil,
+ 		func(t fexpr.Token) (*ResolverResult, error) {
+ 			placeholder := "t" + security.PseudorandomString(5)
+ 			return &ResolverResult{Identifier: "{:" + placeholder + "}", Params: map[string]any{placeholder: t.Literal}}, nil
+-- 
+2.54.0.windows.1
+

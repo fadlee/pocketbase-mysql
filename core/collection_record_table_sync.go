@@ -2,7 +2,6 @@ package core
 
 import (
 	"fmt"
-	"log/slog"
 	"strconv"
 	"strings"
 
@@ -26,7 +25,7 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 	txErr := app.RunInTransaction(func(txApp App) error {
 		// create
 		// -----------------------------------------------------------
-		if oldCollection == nil || !recordTableExistsForSchemaSync(app, txApp, oldCollection.Name) {
+		if oldCollection == nil || !recordTableExistsForSchemaSync(txApp, oldCollection.Name) {
 			tableName := newCollection.Name
 
 			fields := newCollection.Fields
@@ -93,27 +92,25 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 		toRename := map[string]string{}
 		for _, field := range newFields {
 			oldField := oldFields.GetById(field.GetId())
-			if oldField == nil && isMySQLDataDB(txApp) {
-				_, err := txApp.DB().AddColumn(newTableName, field.GetName(), field.ColumnType(txApp)).Execute()
-				if err != nil {
-					return fmt.Errorf("failed to add column %s - %w", field.GetName(), err)
+			if oldField == nil {
+				if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil && sd.AddColumnDirectly() {
+					_, err := txApp.DB().AddColumn(newTableName, field.GetName(), field.ColumnType(txApp)).Execute()
+					if err != nil {
+						return fmt.Errorf("failed to add column %s - %w", field.GetName(), err)
+					}
+					continue
 				}
-
-				continue
-			}
-			if oldField != nil && oldField.GetName() != field.GetName() && isMySQLDataDB(txApp) {
-				_, err := txApp.DB().NewQuery(fmt.Sprintf(
-					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
-					newTableName,
-					oldField.GetName(),
-					field.GetName(),
-					field.ColumnType(txApp),
-				)).Execute()
-				if err != nil {
-					return fmt.Errorf("failed to rename column %s - %w", oldField.GetName(), err)
+			} else if oldField.GetName() != field.GetName() {
+				if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil {
+					renameSQL := sd.RenameColumnSQL(newTableName, oldField.GetName(), field.GetName(), field.ColumnType(txApp))
+					if renameSQL != "" {
+						_, err := txApp.DB().NewQuery(renameSQL).Execute()
+						if err != nil {
+							return fmt.Errorf("failed to rename column %s - %w", oldField.GetName(), err)
+						}
+						continue
+					}
 				}
-
-				continue
 			}
 
 			// Note:
@@ -165,32 +162,18 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 		return txErr
 	}
 
-	if !isMySQLDataDB(app) {
-		// run optimize per the SQLite recommendations
-		// (https://www.sqlite.org/pragma.html#pragma_optimize)
-		_, optimizeErr := app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
-		if optimizeErr != nil {
-			app.Logger().Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", optimizeErr.Error()))
-		}
+	if md := maintenanceDialectIfAvailable(app.Dialect()); md != nil {
+		md.PostSchemaSyncOptimize(app.NonconcurrentDB(), app.Logger())
 	}
 
 	return nil
 }
 
-func recordTableExistsForSchemaSync(app App, txApp App, tableName string) bool {
-	if !isMySQLDataDB(txApp) {
-		return app.HasTable(tableName)
-	}
-
+func recordTableExistsForSchemaSync(txApp App, tableName string) bool {
 	var exists int
-	err := txApp.DB().NewQuery(`
-		SELECT 1
-		FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = DATABASE()
-			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-			AND LOWER(TABLE_NAME) = LOWER({:tableName})
-		LIMIT 1
-	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
+	err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).HasTableQuery()).
+		Bind(dbx.Params{"tableName": tableName}).
+		Row(&exists)
 
 	return err == nil && exists > 0
 }
@@ -232,19 +215,7 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 				Name string `db:"name"`
 				SQL  string `db:"sql"`
 			}{}
-			var err error
-			if isMySQLDataDB(txApp) {
-				err = txApp.DB().Select("TABLE_NAME AS name", "VIEW_DEFINITION AS sql").
-					From("information_schema.VIEWS").
-					AndWhere(dbx.NewExp("TABLE_SCHEMA = DATABASE()")).
-					All(&views)
-			} else {
-				err = txApp.DB().Select("name", "sql").
-					From("sqlite_master").
-					AndWhere(dbx.NewExp("sql is not null")).
-					AndWhere(dbx.HashExp{"type": "view"}).
-					All(&views)
-			}
+			err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).ViewsQuery()).All(&views)
 			if err != nil {
 				return err
 			}
@@ -259,14 +230,13 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 			oldTempName := "_" + newField.GetName() + security.PseudorandomString(5)
 
 			// rename temporary the original column to something else to allow inserting a new one in its place
-			if isMySQLDataDB(txApp) {
-				_, err = txApp.DB().NewQuery(fmt.Sprintf(
-					"ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s",
-					newCollection.Name,
-					originalName,
-					oldTempName,
-					oldField.ColumnType(txApp),
-				)).Execute()
+			if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil && oldField != nil {
+				renameSQL := sd.RenameColumnSQL(newCollection.Name, originalName, oldTempName, oldField.ColumnType(txApp))
+				if renameSQL != "" {
+					_, err = txApp.DB().NewQuery(renameSQL).Execute()
+				} else {
+					_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
+				}
 			} else {
 				_, err = txApp.DB().RenameColumn(newCollection.Name, originalName, oldTempName).Execute()
 			}
@@ -284,31 +254,11 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 
 			if !isOldMultiple && isNewMultiple {
 				// single -> multiple (convert to array)
-				if isMySQLDataDB(txApp) {
-					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
-						`UPDATE {{%s}} set [[%s]] = (
-							CASE
-								WHEN COALESCE([[%s]], '') = ''
-								THEN JSON_ARRAY()
-								ELSE (
-									CASE
-										WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
-										THEN [[%s]]
-										ELSE JSON_ARRAY([[%s]])
-									END
-								)
-							END
-						)`,
-						newCollection.Name,
-						originalName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-					))
+				var conversionSQL string
+				if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil {
+					conversionSQL = sd.SingleToMultiConversionSQL(newCollection.Name, originalName, oldTempName)
 				} else {
-					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+					conversionSQL = fmt.Sprintf(
 						`UPDATE {{%s}} set [[%s]] = (
 							CASE
 								WHEN COALESCE([[%s]], '') = ''
@@ -322,42 +272,20 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 								)
 							END
 						)`,
-						newCollection.Name,
-						originalName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-					))
+						newCollection.Name, originalName, oldTempName, oldTempName, oldTempName, oldTempName, oldTempName,
+					)
 				}
+				copyQuery = txApp.DB().NewQuery(conversionSQL)
 			} else {
 				// multiple -> single (keep only the last element)
 				//
 				// note: for file fields the actual file objects are not
 				// deleted allowing additional custom handling via migration
-				if isMySQLDataDB(txApp) {
-					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
-						`UPDATE {{%s}} set [[%s]] = (
-							CASE
-								WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
-								THEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT([[%s]], CONCAT('$[', JSON_LENGTH([[%s]]) - 1, ']'))), '')
-								WHEN COALESCE([[%s]], '') = ''
-								THEN ''
-								ELSE [[%s]]
-							END
-						)`,
-						newCollection.Name,
-						originalName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-					))
+				var conversionSQL string
+				if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil {
+					conversionSQL = sd.MultiToSingleConversionSQL(newCollection.Name, originalName, oldTempName)
 				} else {
-					copyQuery = txApp.DB().NewQuery(fmt.Sprintf(
+					conversionSQL = fmt.Sprintf(
 						`UPDATE {{%s}} set [[%s]] = (
 							CASE
 								WHEN COALESCE([[%s]], '[]') = '[]'
@@ -371,15 +299,10 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 								)
 							END
 						)`,
-						newCollection.Name,
-						originalName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-						oldTempName,
-					))
+						newCollection.Name, originalName, oldTempName, oldTempName, oldTempName, oldTempName, oldTempName,
+					)
 				}
+				copyQuery = txApp.DB().NewQuery(conversionSQL)
 			}
 
 			// copy the normalized values
@@ -423,8 +346,8 @@ func dropCollectionIndexes(app App, collection *Collection) error {
 			}
 
 			dropQuery := fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", parsed.IndexName)
-			if isMySQLDataDB(txApp) {
-				dropQuery = fmt.Sprintf("DROP INDEX [[%s]] ON [[%s]]", parsed.IndexName, collection.Name)
+			if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil {
+				dropQuery = sd.DropIndexSQL(parsed.IndexName, collection.Name)
 			}
 
 			_, err := txApp.DB().NewQuery(dropQuery).Execute()
@@ -454,7 +377,7 @@ func createCollectionIndexes(app App, collection *Collection) error {
 
 			// ensure that the index is always for the current collection
 			parsed.TableName = collection.Name
-			if isMySQLDataDB(txApp) {
+			if sd := schemaSyncDialectIfAvailable(txApp.Dialect()); sd != nil && !sd.SupportsPartialIndexes() {
 				parsed.Where = ""
 			}
 

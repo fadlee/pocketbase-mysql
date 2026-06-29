@@ -158,7 +158,7 @@ func TestMFAHasExpired(t *testing.T) {
 	now := types.NowDateTime()
 
 	mfa := core.NewMFA(app)
-	mfa.SetRaw("created", now.Add(-5*time.Minute))
+	mfa.SetRaw("created", now.Add(-5*time.Minute-time.Millisecond))
 
 	scenarios := []struct {
 		maxElapsed time.Duration

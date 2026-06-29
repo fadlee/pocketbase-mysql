@@ -1,0 +1,541 @@
+From c24e01f14616e5230423c74fb0aeb8f8f7ad2f98 Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 11:38:13 +0700
+Subject: [PATCH 76/93] refactor: dialectize rowid sort and count override
+
+---
+ apis/record_crud.go           |   6 +-
+ core/db_dialect.go            |  36 +++++++++
+ core/db_dialect_test.go       |  32 ++++++++
+ core/record_field_resolver.go |  19 +++++
+ tools/search/provider.go      |  15 +++-
+ tools/search/provider_test.go | 121 ++++++++++++++++++++++++++++
+ tools/search/sort.go          |  22 +++---
+ tools/search/sort_test.go     | 143 ++++++++++++++++++++++++++++++++++
+ 8 files changed, 382 insertions(+), 12 deletions(-)
+
+diff --git a/apis/record_crud.go b/apis/record_crud.go
+index f3cb7036..6cb62f76 100644
+--- a/apis/record_crud.go
++++ b/apis/record_crud.go
+@@ -80,8 +80,10 @@ func recordsList(e *core.RequestEvent) error {
+ 	searchProvider := search.NewProvider(fieldsResolver).Query(query)
+ 
+ 	// use rowid when available to minimize the need of a covering index with the "id" field
+-	if !collection.IsView() && !core.IsMySQLDataDB(e.App) {
+-		searchProvider.CountCol("_rowid_")
++	if d, ok := e.App.Dialect().(interface{ CountOverrideColumn(bool) (string, bool) }); ok {
++		if col, override := d.CountOverrideColumn(collection.IsView()); override {
++			searchProvider.CountCol(col)
++		}
+ 	}
+ 
+ 	records := []*core.Record{}
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index a2dc5d93..55039c90 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -70,6 +70,20 @@ type equalityDialect interface {
+ 	LikeColumnContainsExpr(column string) string
+ }
+ 
++// rowidDialect is a local (unexported) capability interface that exposes
++// dialect-specific count override column semantics.
++//
++// It is intentionally kept separate from the exported [Dialect] interface so
++// that the public surface stays minimal while the concrete dialect types can
++// still be type-asserted to provide the count override column.
++//
++// CountOverrideColumn returns the column to use for COUNT(DISTINCT ...) queries
++// and a boolean indicating whether an override should be applied. When the
++// boolean is false, the caller should keep the default "id" column.
++type rowidDialect interface {
++	CountOverrideColumn(isView bool) (string, bool)
++}
++
+ // SQLiteDialect represents the SQLite data database dialect.
+ type SQLiteDialect struct{}
+ 
+@@ -166,6 +180,20 @@ func (SQLiteDialect) LikeColumnContainsExpr(column string) string {
+ 	return fmt.Sprintf("'%%' || %s || '%%'", column)
+ }
+ 
++// CountOverrideColumn implements the [rowidDialect] interface.
++//
++// SQLite non-view collections can use the builtin _rowid_ column for
++// COUNT(DISTINCT ...) queries to minimize the need of a covering index
++// with the "id" field. Views don't have a _rowid_ column, so no override
++// is provided and the default "id" column is used.
++func (SQLiteDialect) CountOverrideColumn(isView bool) (string, bool) {
++	if isView {
++		return "", false
++	}
++
++	return "_rowid_", true
++}
++
+ // MySQLDialect represents the MySQL data database dialect.
+ type MySQLDialect struct{}
+ 
+@@ -295,6 +323,14 @@ func (MySQLDialect) LikeColumnContainsExpr(column string) string {
+ 	return fmt.Sprintf("CONCAT('%%', %s, '%%')", column)
+ }
+ 
++// CountOverrideColumn implements the [rowidDialect] interface.
++//
++// MySQL doesn't have a _rowid_ column, so no count override is provided
++// and the default "id" column is used for both regular collections and views.
++func (MySQLDialect) CountOverrideColumn(isView bool) (string, bool) {
++	return "", false
++}
++
+ // DialectForDriver returns the [Dialect] for the provided driver name.
+ //
+ // The PB_DATABASE_DRIVER env var takes precedence over the provided
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index 8b070384..c89bceaf 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -118,3 +118,35 @@ func TestIntrospectionDialectMySQL(t *testing.T) {
+ 				AND LOWER(INDEX_NAME) = LOWER({:indexName})
+ 			LIMIT 1`, d.IndexOwnerQuery())
+ }
++
++func TestCountOverrideColumnSQLite(t *testing.T) {
++	d := core.SQLiteDialect{}
++
++	t.Run("non-view returns _rowid_ override", func(t *testing.T) {
++		col, ok := d.CountOverrideColumn(false)
++		require.True(t, ok)
++		require.Equal(t, "_rowid_", col)
++	})
++
++	t.Run("view returns no override", func(t *testing.T) {
++		col, ok := d.CountOverrideColumn(true)
++		require.False(t, ok)
++		require.Equal(t, "", col)
++	})
++}
++
++func TestCountOverrideColumnMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	t.Run("non-view returns no override", func(t *testing.T) {
++		col, ok := d.CountOverrideColumn(false)
++		require.False(t, ok)
++		require.Equal(t, "", col)
++	})
++
++	t.Run("view returns no override", func(t *testing.T) {
++		col, ok := d.CountOverrideColumn(true)
++		require.False(t, ok)
++		require.Equal(t, "", col)
++	})
++}
+diff --git a/core/record_field_resolver.go b/core/record_field_resolver.go
+index be5aba94..7f02ff85 100644
+--- a/core/record_field_resolver.go
++++ b/core/record_field_resolver.go
+@@ -123,6 +123,25 @@ func (r *RecordFieldResolver) LikeColumnContainsExpr(column string) string {
+ 	return fmt.Sprintf("'%%' || %s || '%%'", column)
+ }
+ 
++// RowidSortExpr implements the rowidSortResolver capability interface
++// by returning a dialect-specific @rowid sort expression.
++//
++// For SQLite it returns the static `[[_rowid_]] {direction}` expression.
++// For MySQL it resolves the "id" field and returns `{resolved} {direction}`.
++func (r *RecordFieldResolver) RowidSortExpr(direction string) (string, error) {
++	if r.app.Dialect().Name() == DialectMySQLName {
++		result, err := r.Resolve("id")
++		if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
++			return "", fmt.Errorf("invalid sort field %q", "@rowid")
++		}
++
++		return fmt.Sprintf("%s %s", result.Identifier, direction), nil
++	}
++
++	// SQLite default
++	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
++}
++
+ // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
+ func NewRecordFieldResolver(
+ 	app App,
+diff --git a/tools/search/provider.go b/tools/search/provider.go
+index 02a1f7b7..d096f192 100644
+--- a/tools/search/provider.go
++++ b/tools/search/provider.go
+@@ -262,10 +262,23 @@ func (s *Provider) Exec(items any) (*Result, error) {
+ 		}
+ 		if expr != "" {
+ 			// ensure that _rowid_ expressions are always prefixed with the first FROM table
++			//
++			// note: the expr at this point includes the direction suffix
++			// (e.g. "[[_rowid_]] DESC"), so only the column part is prefixed
++			// to avoid producing invalid SQL like "[[demo1.]][[_rowid_]] DESC".
++			// For MySQL, the resolved id expression may already contain a
++			// table prefix (e.g. "[[demo1.id]]"), in which case the
++			// `!strings.Contains(expr, ".")` check correctly skips prefixing.
+ 			if sortField.Name == rowidSortKey && !strings.Contains(expr, ".") {
+ 				queryInfo := modelsQuery.Info()
+ 				if len(queryInfo.From) > 0 {
+-					expr = "[[" + inflector.Columnify(queryInfo.From[0]) + "]]." + expr
++					parts := strings.SplitN(expr, " ", 2)
++					prefixed := "[[" + inflector.Columnify(queryInfo.From[0]) + "]]." + parts[0]
++					if len(parts) > 1 {
++						expr = prefixed + " " + parts[1]
++					} else {
++						expr = prefixed
++					}
+ 				}
+ 			}
+ 
+diff --git a/tools/search/provider_test.go b/tools/search/provider_test.go
+index fc73a4df..09871271 100644
+--- a/tools/search/provider_test.go
++++ b/tools/search/provider_test.go
+@@ -606,6 +606,127 @@ func TestProviderFilterAndSortLimits(t *testing.T) {
+ 	}
+ }
+ 
++// TestProviderRowidSortPrefixing verifies that @rowid sort expressions
++// are correctly prefixed with the first FROM table, producing valid SQL
++// (e.g. "[[test]].[[_rowid_]] DESC" rather than the broken
++// "[[test.]][[_rowid_]] DESC").
++func TestProviderRowidSortPrefixing(t *testing.T) {
++	testDB, err := createTestDB()
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer testDB.Close()
++
++	query := testDB.Select("*").
++		From("test").
++		Where(dbx.Not(dbx.HashExp{"test1": nil})).
++		OrderBy("test1 ASC")
++
++	scenarios := []struct {
++		name          string
++		resolver      FieldResolver
++		sort          []SortField
++		skipTotal     bool
++		expectError   bool
++		expectQueries []string
++	}{
++		{
++			"SQLite default (testFieldResolver, no rowidSortResolver)",
++			&testFieldResolver{},
++			[]SortField{{"@rowid", SortDesc}},
++			true, // skipTotal to only check the models query
++			false,
++			[]string{
++				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[_rowid_]] DESC LIMIT 30",
++			},
++		},
++		{
++			"SQLite default (testFieldResolver, asc)",
++			&testFieldResolver{},
++			[]SortField{{"@rowid", SortAsc}},
++			true,
++			false,
++			[]string{
++				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[_rowid_]] ASC LIMIT 30",
++			},
++		},
++		{
++			"MySQL resolver (id already table-prefixed, no extra prefixing)",
++			&mysqlProviderTestResolver{identifier: "[[test.id]]"},
++			[]SortField{{"@rowid", SortDesc}},
++			true,
++			false,
++			[]string{
++				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test.id]] DESC LIMIT 30",
++			},
++		},
++		{
++			"MySQL resolver (id without table prefix, gets prefixed)",
++			&mysqlProviderTestResolver{identifier: "[[id]]"},
++			[]SortField{{"@rowid", SortDesc}},
++			true,
++			false,
++			[]string{
++				"SELECT * FROM `test` WHERE NOT (`test1` IS NULL) ORDER BY `test1` ASC, [[test]].[[id]] DESC LIMIT 30",
++			},
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			testDB.CalledQueries = []string{} // reset
++
++			p := NewProvider(s.resolver).
++				Query(query).
++				Sort(s.sort).
++				SkipTotal(s.skipTotal)
++
++			_, err := p.Exec(&[]testTableStruct{})
++
++			hasErr := err != nil
++			if hasErr != s.expectError {
++				t.Fatalf("Expected hasErr %v, got %v (%v)", s.expectError, hasErr, err)
++			}
++
++			if hasErr {
++				return
++			}
++
++			if len(s.expectQueries) != len(testDB.CalledQueries) {
++				t.Fatalf("Expected %d queries, got %d: \n%v", len(s.expectQueries), len(testDB.CalledQueries), testDB.CalledQueries)
++			}
++
++			for _, q := range testDB.CalledQueries {
++				if !list.ExistInSliceWithRegex(q, s.expectQueries) {
++					t.Fatalf("Didn't expect query \n%v \nin \n%v", q, s.expectQueries)
++				}
++			}
++		})
++	}
++}
++
++// mysqlProviderTestResolver is a test resolver that implements the
++// rowidSortResolver capability to simulate MySQL @rowid behavior for
++// provider prefixing tests.
++type mysqlProviderTestResolver struct {
++	identifier string
++}
++
++func (r *mysqlProviderTestResolver) UpdateQuery(_ *dbx.SelectQuery) error { return nil }
++func (r *mysqlProviderTestResolver) Resolve(field string) (*ResolverResult, error) {
++	if field == "id" {
++		return &ResolverResult{Identifier: r.identifier}, nil
++	}
++	return &ResolverResult{Identifier: field}, nil
++}
++func (r *mysqlProviderTestResolver) RowidSortExpr(direction string) (string, error) {
++	result, err := r.Resolve("id")
++	if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
++		return "", fmt.Errorf("invalid sort field %q", "@rowid")
++	}
++	return fmt.Sprintf("%s %s", result.Identifier, direction), nil
++}
++
+ func TestProviderParseAndExec(t *testing.T) {
+ 	testDB, err := createTestDB()
+ 	if err != nil {
+diff --git a/tools/search/sort.go b/tools/search/sort.go
+index 4ddd0dce..7d65c525 100644
+--- a/tools/search/sort.go
++++ b/tools/search/sort.go
+@@ -2,7 +2,6 @@ package search
+ 
+ import (
+ 	"fmt"
+-	"os"
+ 	"strings"
+ )
+ 
+@@ -23,6 +22,15 @@ type SortField struct {
+ 	Direction string `json:"direction"`
+ }
+ 
++// rowidSortResolver is an optional capability interface that resolvers
++// can implement to provide dialect-specific @rowid sort expressions.
++//
++// When a resolver does not implement this interface, the SQLite default
++// (`[[_rowid_]] {direction}`) is used.
++type rowidSortResolver interface {
++	RowidSortExpr(direction string) (string, error)
++}
++
+ // BuildExpr resolves the sort field into a valid db sort expression.
+ func (s *SortField) BuildExpr(fieldResolver FieldResolver) (string, error) {
+ 	// special case for random sort
+@@ -30,17 +38,13 @@ func (s *SortField) BuildExpr(fieldResolver FieldResolver) (string, error) {
+ 		return "RANDOM()", nil
+ 	}
+ 
+-	// special case for the builtin SQLite rowid column
++	// special case for the builtin rowid column
+ 	if s.Name == rowidSortKey {
+-		if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+-			result, err := fieldResolver.Resolve("id")
+-			if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
+-				return "", fmt.Errorf("invalid sort field %q", s.Name)
+-			}
+-
+-			return fmt.Sprintf("%s %s", result.Identifier, s.Direction), nil
++		if r, ok := fieldResolver.(rowidSortResolver); ok {
++			return r.RowidSortExpr(s.Direction)
+ 		}
+ 
++		// SQLite default fallback
+ 		return fmt.Sprintf("[[_rowid_]] %s", s.Direction), nil
+ 	}
+ 
+diff --git a/tools/search/sort_test.go b/tools/search/sort_test.go
+index 1c23cc45..3fea9eae 100644
+--- a/tools/search/sort_test.go
++++ b/tools/search/sort_test.go
+@@ -3,8 +3,11 @@ package search_test
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"os"
++	"strings"
+ 	"testing"
+ 
++	"github.com/pocketbase/dbx"
+ 	"github.com/pocketbase/pocketbase/tools/search"
+ )
+ 
+@@ -50,6 +53,146 @@ func TestSortFieldBuildExpr(t *testing.T) {
+ 	}
+ }
+ 
++// TestSortFieldBuildExprRowidDialects verifies that @rowid sort output
++// is dialect-specific when the resolver implements the rowidSortResolver
++// capability, and falls back to the SQLite default otherwise.
++func TestSortFieldBuildExprRowidDialects(t *testing.T) {
++	scenarios := []struct {
++		name             string
++		resolver         search.FieldResolver
++		direction        string
++		expectError      bool
++		expectExpression string
++	}{
++		{
++			"SimpleFieldResolver (SQLite default fallback)",
++			search.NewSimpleFieldResolver("id", "test1"),
++			search.SortDesc,
++			false,
++			"[[_rowid_]] DESC",
++		},
++		{
++			"SimpleFieldResolver (SQLite default fallback, asc)",
++			search.NewSimpleFieldResolver("id", "test1"),
++			search.SortAsc,
++			false,
++			"[[_rowid_]] ASC",
++		},
++		{
++			"mysql rowid resolver (resolves id)",
++			&mysqlRowidTestResolver{identifier: "[[demo1.id]]"},
++			search.SortDesc,
++			false,
++			"[[demo1.id]] DESC",
++		},
++		{
++			"mysql rowid resolver (resolves id, asc)",
++			&mysqlRowidTestResolver{identifier: "[[demo1.id]]"},
++			search.SortAsc,
++			false,
++			"[[demo1.id]] ASC",
++		},
++		{
++			"mysql rowid resolver (invalid id)",
++			&mysqlRowidTestResolver{identifier: ""},
++			search.SortDesc,
++			true,
++			"",
++		},
++		{
++			"mysql rowid resolver (null id)",
++			&mysqlRowidTestResolver{identifier: "null"},
++			search.SortDesc,
++			true,
++			"",
++		},
++		{
++			"sqlite rowid resolver (static expression)",
++			&sqliteRowidTestResolver{},
++			search.SortDesc,
++			false,
++			"[[_rowid_]] DESC",
++		},
++	}
++
++	for _, s := range scenarios {
++		t.Run(s.name, func(t *testing.T) {
++			result, err := (&search.SortField{Name: "@rowid", Direction: s.direction}).BuildExpr(s.resolver)
++
++			hasErr := err != nil
++			if hasErr != s.expectError {
++				t.Fatalf("Expected hasErr %v, got %v (%v)", s.expectError, hasErr, err)
++			}
++
++			if result != s.expectExpression {
++				t.Fatalf("Expected expression %q, got %q", s.expectExpression, result)
++			}
++		})
++	}
++}
++
++// TestSortFieldBuildExprRowidIgnoresEnv verifies that the generic
++// SimpleFieldResolver always returns the SQLite default @rowid expression
++// regardless of the PB_DATABASE_DRIVER env var value.
++func TestSortFieldBuildExprRowidIgnoresEnv(t *testing.T) {
++	original := os.Getenv("PB_DATABASE_DRIVER")
++	t.Cleanup(func() { os.Setenv("PB_DATABASE_DRIVER", original) })
++
++	resolver := search.NewSimpleFieldResolver("id", "test1")
++
++	for _, driver := range []string{"", "sqlite", "mysql", "MySQL"} {
++		t.Run("driver="+driver, func(t *testing.T) {
++			os.Setenv("PB_DATABASE_DRIVER", driver)
++
++			result, err := (&search.SortField{Name: "@rowid", Direction: search.SortDesc}).BuildExpr(resolver)
++			if err != nil {
++				t.Fatalf("Expected no error, got %v", err)
++			}
++
++			expected := "[[_rowid_]] DESC"
++			if result != expected {
++				t.Fatalf("Expected expression %q, got %q", expected, result)
++			}
++		})
++	}
++}
++
++// mysqlRowidTestResolver is a test resolver that implements the
++// rowidSortResolver capability to simulate MySQL @rowid behavior.
++type mysqlRowidTestResolver struct {
++	identifier string
++}
++
++func (r *mysqlRowidTestResolver) UpdateQuery(_ *dbx.SelectQuery) error { return nil }
++func (r *mysqlRowidTestResolver) Resolve(field string) (*search.ResolverResult, error) {
++	if field == "id" {
++		if r.identifier == "" {
++			return &search.ResolverResult{Identifier: ""}, nil
++		}
++		return &search.ResolverResult{Identifier: r.identifier}, nil
++	}
++	return nil, fmt.Errorf("failed to resolve field %q", field)
++}
++func (r *mysqlRowidTestResolver) RowidSortExpr(direction string) (string, error) {
++	result, err := r.Resolve("id")
++	if err != nil || len(result.Params) > 0 || result.Identifier == "" || strings.ToLower(result.Identifier) == "null" {
++		return "", fmt.Errorf("invalid sort field %q", "@rowid")
++	}
++	return fmt.Sprintf("%s %s", result.Identifier, direction), nil
++}
++
++// sqliteRowidTestResolver is a test resolver that implements the
++// rowidSortResolver capability to simulate SQLite @rowid behavior.
++type sqliteRowidTestResolver struct{}
++
++func (r *sqliteRowidTestResolver) UpdateQuery(_ *dbx.SelectQuery) error { return nil }
++func (r *sqliteRowidTestResolver) Resolve(field string) (*search.ResolverResult, error) {
++	return &search.ResolverResult{Identifier: "[[" + field + "]]"}, nil
++}
++func (r *sqliteRowidTestResolver) RowidSortExpr(direction string) (string, error) {
++	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
++}
++
+ func TestParseSortFromString(t *testing.T) {
+ 	scenarios := []struct {
+ 		value    string
+-- 
+2.54.0.windows.1
+
