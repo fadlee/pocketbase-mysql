@@ -509,13 +509,23 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 			}
 			jsonPathStr := jsonPath.String()
 
+			var extractExpr string
+			var extractExprMM string
+			if d := r.resolver.jsonExtractDialectIfAvailable(); d != nil {
+				extractExpr = d.JSONExtractExpr(r.activeTableAlias+"."+inflector.Columnify(prop), jsonPathStr)
+				extractExprMM = d.JSONExtractExpr(r.multiMatchActiveTableAlias+"."+inflector.Columnify(prop), jsonPathStr)
+			} else {
+				extractExpr = dbutils.JSONExtract(r.activeTableAlias+"."+inflector.Columnify(prop), jsonPathStr)
+				extractExprMM = dbutils.JSONExtract(r.multiMatchActiveTableAlias+"."+inflector.Columnify(prop), jsonPathStr)
+			}
+
 			result := &search.ResolverResult{
 				NullFallback: search.NullFallbackDisabled,
-				Identifier:   dbutils.JSONExtract(r.activeTableAlias+"."+inflector.Columnify(prop), jsonPathStr),
+				Identifier:   extractExpr,
 			}
 
 			if r.withMultiMatch {
-				r.multiMatch.ValueIdentifier = dbutils.JSONExtract(r.multiMatchActiveTableAlias+"."+inflector.Columnify(prop), jsonPathStr)
+				r.multiMatch.ValueIdentifier = extractExprMM
 				result.MultiMatchSubQuery = r.multiMatch
 			}
 
@@ -931,9 +941,16 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 	// (https://github.com/pocketbase/pocketbase/issues/4068)
 	if field.Type() == FieldTypeJSON {
 		result.NullFallback = search.NullFallbackDisabled
-		result.Identifier = dbutils.JSONExtract(r.activeTableAlias+"."+cleanFieldName, "")
-		if r.withMultiMatch {
-			r.multiMatch.ValueIdentifier = dbutils.JSONExtract(r.multiMatchActiveTableAlias+"."+cleanFieldName, "")
+		if d := r.resolver.jsonExtractDialectIfAvailable(); d != nil {
+			result.Identifier = d.JSONExtractExpr(r.activeTableAlias+"."+cleanFieldName, "")
+			if r.withMultiMatch {
+				r.multiMatch.ValueIdentifier = d.JSONExtractExpr(r.multiMatchActiveTableAlias+"."+cleanFieldName, "")
+			}
+		} else {
+			result.Identifier = dbutils.JSONExtract(r.activeTableAlias+"."+cleanFieldName, "")
+			if r.withMultiMatch {
+				r.multiMatch.ValueIdentifier = dbutils.JSONExtract(r.multiMatchActiveTableAlias+"."+cleanFieldName, "")
+			}
 		}
 	}
 

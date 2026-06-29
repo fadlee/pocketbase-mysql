@@ -538,6 +538,16 @@ func (r *RecordFieldResolver) jsonLengthDialectIfAvailable() jsonLengthDialect {
 	return nil
 }
 
+// jsonExtractDialectIfAvailable returns the jsonExtractDialect capability if
+// the configured dialect implements it, or nil otherwise (e.g. in tests
+// without a real dialect).
+func (r *RecordFieldResolver) jsonExtractDialectIfAvailable() jsonExtractDialect {
+	if d, ok := r.app.Dialect().(jsonExtractDialect); ok {
+		return d
+	}
+	return nil
+}
+
 func (r *RecordFieldResolver) registerRuleJoin(collection *Collection, tableAlias string) {
 	// replace existing
 	for i, j := range r.listRuleJoins {

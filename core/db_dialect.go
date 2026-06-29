@@ -129,6 +129,27 @@ type jsonLengthDialect interface {
 	JSONArrayLengthExpr(column string) string
 }
 
+// jsonExtractDialect is a local (unexported) capability interface that
+// exposes dialect-specific JSON path extraction expression generation.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal while the concrete dialect types
+// can be type-asserted to provide JSON extraction expressions.
+type jsonExtractDialect interface {
+	// JSONExtractExpr returns a SQL expression that extracts a value at
+	// the given JSON path from a column.
+	//
+	// For SQLite: (CASE WHEN json_valid(col) THEN JSON_EXTRACT(col, '$.path') ELSE JSON_EXTRACT(json_object('pb', col), '$.pb.path') END)
+	// For MySQL: (CASE WHEN JSON_VALID(col) THEN JSON_UNQUOTE(JSON_EXTRACT(col, '$.path')) ELSE JSON_UNQUOTE(JSON_EXTRACT(JSON_OBJECT('pb', col), '$.pb.path')) END)
+	//
+	// The path is prefixed with "." if it doesn't start with "[".
+	// An empty path extracts the root value.
+	//
+	// The expression must work for string, numeric, and null comparisons
+	// without resolver-side hacks.
+	JSONExtractExpr(column string, path string) string
+}
+
 // SQLiteDialect represents the SQLite data database dialect.
 type SQLiteDialect struct{}
 
@@ -261,6 +282,11 @@ func (SQLiteDialect) JSONArrayLengthExpr(column string) string {
 	return dbutils.JSONArrayLength(column)
 }
 
+// JSONExtractExpr implements the [jsonExtractDialect] interface.
+func (SQLiteDialect) JSONExtractExpr(column string, path string) string {
+	return dbutils.JSONExtract(column, path)
+}
+
 // MySQLDialect represents the MySQL data database dialect.
 type MySQLDialect struct{}
 
@@ -358,14 +384,16 @@ func (MySQLDialect) IndexOwnerQuery() string {
 
 // EqualityOperators implements the [equalityDialect] interface.
 //
-// MySQL doesn't support `IS NOT` with non-NULL operands (only `IS NOT NULL`,
-// `IS NOT TRUE`, etc.), so `<>` is used for value comparisons while keeping
-// `IS NOT NULL` for the null check which works in both drivers.
+// MySQL doesn't support `IS` with non-NULL operands (only `IS NULL`,
+// `IS NOT NULL`, `IS TRUE`, etc.), so `<=>` (null-safe equality) is used
+// for the NullEqualOp to preserve SQLite's `IS` semantics where
+// `NULL IS NULL` returns true. For not-equal, `<>` is used for value
+// comparisons while keeping `IS NOT NULL` for the null check.
 func (MySQLDialect) EqualityOperators() search.EqualityOperators {
 	return search.EqualityOperators{
 		Equal: search.EqualityOperatorSet{
 			EqualOp:     "=",
-			NullEqualOp: "IS",
+			NullEqualOp: "<=>",
 			NullConcat:  "OR",
 			NullExpr:    "IS NULL",
 		},
@@ -428,6 +456,30 @@ func (MySQLDialect) JSONArrayLengthExpr(column string) string {
 	return fmt.Sprintf(
 		`JSON_LENGTH(CASE WHEN IF(JSON_VALID([[%s]]), JSON_TYPE([[%s]]) = 'ARRAY', FALSE) THEN [[%s]] ELSE (CASE WHEN [[%s]] = '' OR [[%s]] IS NULL THEN JSON_ARRAY() ELSE JSON_ARRAY([[%s]]) END) END)`,
 		column, column, column, column, column, column,
+	)
+}
+
+// JSONExtractExpr implements the [jsonExtractDialect] interface.
+//
+// MySQL's JSON_EXTRACT returns quoted JSON strings (e.g. "alice" instead of
+// alice), so JSON_UNQUOTE is used to preserve SQLite-like comparison
+// semantics for string, numeric, and null values.
+//
+// JSON_UNQUOTE on non-string JSON values (numbers, booleans, null) returns
+// them as-is, so numeric and null comparisons work correctly.
+func (MySQLDialect) JSONExtractExpr(column string, path string) string {
+	// prefix the path with dot if it is not starting with array notation
+	if path != "" && !strings.HasPrefix(path, "[") {
+		path = "." + path
+	}
+
+	return fmt.Sprintf(
+		"(CASE WHEN JSON_VALID([[%s]]) THEN JSON_UNQUOTE(JSON_EXTRACT([[%s]], '$%s')) ELSE JSON_UNQUOTE(JSON_EXTRACT(JSON_OBJECT('pb', [[%s]]), '$.pb%s')) END)",
+		column,
+		column,
+		path,
+		column,
+		path,
 	)
 }
 
