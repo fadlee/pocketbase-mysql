@@ -39,6 +39,22 @@ type columnDialect interface {
 	JSONValueColumnType(defaultValue string) string
 }
 
+// introspectionDialect is a local (unexported) capability interface that
+// exposes dialect-specific SQL queries for table metadata introspection
+// (columns, indexes, table existence, views, etc.).
+//
+// It is intentionally kept separate from the exported [Dialect] interface so
+// that the public surface stays minimal while the concrete dialect types can
+// still be type-asserted to provide introspection SQL.
+type introspectionDialect interface {
+	TableColumnsQuery() string
+	TableInfoQuery() string
+	TableIndexesQuery() string
+	HasTableQuery() string
+	ViewsQuery() string
+	IndexOwnerQuery() string
+}
+
 // SQLiteDialect represents the SQLite data database dialect.
 type SQLiteDialect struct{}
 
@@ -75,6 +91,36 @@ func (SQLiteDialect) JSONArrayColumnType() string {
 // JSONValueColumnType implements the [columnDialect] interface.
 func (SQLiteDialect) JSONValueColumnType(defaultValue string) string {
 	return fmt.Sprintf("JSON DEFAULT '%s' NOT NULL", defaultValue)
+}
+
+// TableColumnsQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) TableColumnsQuery() string {
+	return "SELECT name FROM PRAGMA_TABLE_INFO({:tableName})"
+}
+
+// TableInfoQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) TableInfoQuery() string {
+	return "SELECT * FROM PRAGMA_TABLE_INFO({:tableName})"
+}
+
+// TableIndexesQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) TableIndexesQuery() string {
+	return "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'index' AND tbl_name = {:tableName}"
+}
+
+// HasTableQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) HasTableQuery() string {
+	return "SELECT (1) FROM sqlite_schema WHERE type IN ('table', 'view') AND LOWER(name) = LOWER({:tableName}) LIMIT 1"
+}
+
+// ViewsQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) ViewsQuery() string {
+	return "SELECT name, sql FROM sqlite_master WHERE sql is not null AND type = 'view'"
+}
+
+// IndexOwnerQuery implements the [introspectionDialect] interface.
+func (SQLiteDialect) IndexOwnerQuery() string {
+	return "SELECT tbl_name FROM sqlite_master WHERE type = 'index' AND LOWER(tbl_name) != LOWER({:oldName}) AND LOWER(tbl_name) != LOWER({:newName}) AND LOWER(name) = LOWER({:indexName}) LIMIT 1"
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -114,6 +160,64 @@ func (MySQLDialect) JSONArrayColumnType() string {
 // is ignored and the zero value is supplied at the application layer.
 func (MySQLDialect) JSONValueColumnType(defaultValue string) string {
 	return "JSON NOT NULL"
+}
+
+// TableColumnsQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) TableColumnsQuery() string {
+	return `SELECT COLUMN_NAME
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
+			ORDER BY ORDINAL_POSITION`
+}
+
+// TableInfoQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) TableInfoQuery() string {
+	return `SELECT
+				ORDINAL_POSITION - 1 AS cid,
+				COLUMN_NAME AS name,
+				COLUMN_TYPE AS type,
+				CASE WHEN IS_NULLABLE = 'NO' THEN 1 ELSE 0 END AS notnull,
+				COLUMN_DEFAULT AS dflt_value,
+				CASE WHEN COLUMN_KEY = 'PRI' THEN 1 ELSE 0 END AS pk
+			FROM information_schema.COLUMNS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName}
+			ORDER BY ORDINAL_POSITION`
+}
+
+// TableIndexesQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) TableIndexesQuery() string {
+	return `SELECT INDEX_NAME AS name, CONCAT('INDEX ', INDEX_NAME) AS sql
+			FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = {:tableName} AND INDEX_NAME != 'PRIMARY'
+			GROUP BY INDEX_NAME`
+}
+
+// HasTableQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) HasTableQuery() string {
+	return `SELECT 1
+			FROM information_schema.TABLES
+			WHERE TABLE_SCHEMA = DATABASE()
+				AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
+				AND LOWER(TABLE_NAME) = LOWER({:tableName})
+			LIMIT 1`
+}
+
+// ViewsQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) ViewsQuery() string {
+	return `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
+			FROM information_schema.VIEWS
+			WHERE TABLE_SCHEMA = DATABASE()`
+}
+
+// IndexOwnerQuery implements the [introspectionDialect] interface.
+func (MySQLDialect) IndexOwnerQuery() string {
+	return `SELECT TABLE_NAME
+			FROM information_schema.STATISTICS
+			WHERE TABLE_SCHEMA = DATABASE()
+				AND LOWER(TABLE_NAME) != LOWER({:oldName})
+				AND LOWER(TABLE_NAME) != LOWER({:newName})
+				AND LOWER(INDEX_NAME) = LOWER({:indexName})
+			LIMIT 1`
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.

@@ -26,7 +26,7 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 	txErr := app.RunInTransaction(func(txApp App) error {
 		// create
 		// -----------------------------------------------------------
-		if oldCollection == nil || !recordTableExistsForSchemaSync(app, txApp, oldCollection.Name) {
+		if oldCollection == nil || !recordTableExistsForSchemaSync(txApp, oldCollection.Name) {
 			tableName := newCollection.Name
 
 			fields := newCollection.Fields
@@ -177,20 +177,11 @@ func (app *BaseApp) SyncRecordTableSchema(newCollection *Collection, oldCollecti
 	return nil
 }
 
-func recordTableExistsForSchemaSync(app App, txApp App, tableName string) bool {
-	if !isMySQLDataDB(txApp) {
-		return app.HasTable(tableName)
-	}
-
+func recordTableExistsForSchemaSync(txApp App, tableName string) bool {
 	var exists int
-	err := txApp.DB().NewQuery(`
-		SELECT 1
-		FROM information_schema.TABLES
-		WHERE TABLE_SCHEMA = DATABASE()
-			AND TABLE_TYPE IN ('BASE TABLE', 'VIEW')
-			AND LOWER(TABLE_NAME) = LOWER({:tableName})
-		LIMIT 1
-	`).Bind(dbx.Params{"tableName": tableName}).Row(&exists)
+	err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).HasTableQuery()).
+		Bind(dbx.Params{"tableName": tableName}).
+		Row(&exists)
 
 	return err == nil && exists > 0
 }
@@ -232,19 +223,7 @@ func normalizeSingleVsMultipleFieldChanges(app App, newCollection *Collection, o
 				Name string `db:"name"`
 				SQL  string `db:"sql"`
 			}{}
-			var err error
-			if isMySQLDataDB(txApp) {
-				err = txApp.DB().Select("TABLE_NAME AS name", "VIEW_DEFINITION AS sql").
-					From("information_schema.VIEWS").
-					AndWhere(dbx.NewExp("TABLE_SCHEMA = DATABASE()")).
-					All(&views)
-			} else {
-				err = txApp.DB().Select("name", "sql").
-					From("sqlite_master").
-					AndWhere(dbx.NewExp("sql is not null")).
-					AndWhere(dbx.HashExp{"type": "view"}).
-					All(&views)
-			}
+			err := txApp.DB().NewQuery(txApp.Dialect().(introspectionDialect).ViewsQuery()).All(&views)
 			if err != nil {
 				return err
 			}
