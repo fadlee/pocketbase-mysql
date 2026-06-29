@@ -568,3 +568,91 @@ func TestBaseAppTriggerOnTerminate(t *testing.T) {
 	app.OnTerminate().Trigger(event)
 	app.OnTerminate().Trigger(event)
 }
+
+func TestUnbootstrappedAppDialectIsSQLiteByDefault(t *testing.T) {
+	const testDataDir = "./pb_base_app_dialect_unboot_data_dir/"
+	defer os.RemoveAll(testDataDir)
+
+	app := core.NewBaseApp(core.BaseAppConfig{
+		DataDir: testDataDir,
+	})
+
+	// unbootstrapped app should be nil-safe and return SQLite by default
+	d := app.Dialect()
+	require := func(cond bool, msg string) {
+		if !cond {
+			t.Fatal(msg)
+		}
+	}
+	require(d != nil, "expected non-nil dialect for unbootstrapped app")
+	require(d.Name() == core.DialectSQLiteName, "expected SQLite dialect for unbootstrapped app without env override")
+}
+
+func TestResetBootstrapStateClearsCachedDialect(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	// after bootstrap, dialect should be cached and SQLite (test app uses sqlite)
+	d := app.Dialect()
+	if d == nil || d.Name() != core.DialectSQLiteName {
+		t.Fatalf("expected cached SQLite dialect after bootstrap, got %v", d)
+	}
+
+	// reset should clear the cached dialect
+	if err := app.ResetBootstrapState(); err != nil {
+		t.Fatal(err)
+	}
+
+	// after reset, Dialect() should fall back to DialectForDriver which checks env.
+	// No env override set, so it should still be SQLite.
+	d = app.Dialect()
+	if d == nil || d.Name() != core.DialectSQLiteName {
+		t.Fatalf("expected SQLite dialect after reset without env override, got %v", d)
+	}
+}
+
+func TestResetBootstrapStateDialectFallbackObservesEnv(t *testing.T) {
+	t.Setenv("PB_DATABASE_DRIVER", "mysql")
+
+	app, err := tests.NewTestAppWithConfig(core.BaseAppConfig{
+		DBConnect: func(dbPath string) (*dbx.DB, error) {
+			pragmas := "?_pragma=busy_timeout(10000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(ON)"
+			return dbx.Open("sqlite", dbPath+pragmas)
+		},
+	})
+	require := func(cond bool, msg string) {
+		if !cond {
+			t.Fatal(msg)
+		}
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer app.Cleanup()
+
+	// env-forced: even with sqlite-backed test app, dialect should be MySQL
+	d := app.Dialect()
+	require(d != nil, "expected non-nil dialect with env override")
+	require(d.Name() == core.DialectMySQLName, "expected MySQL dialect with env override")
+
+	if err := app.ResetBootstrapState(); err != nil {
+		t.Fatal(err)
+	}
+
+	// after reset, fallback should still observe env and return MySQL
+	d = app.Dialect()
+	require(d != nil, "expected non-nil dialect after reset with env override")
+	require(d.Name() == core.DialectMySQLName, "expected MySQL dialect after reset with env override")
+}
+
+func TestUnsafeWithoutHooksPreservesDialect(t *testing.T) {
+	app, _ := tests.NewTestApp()
+	defer app.Cleanup()
+
+	clone := app.UnsafeWithoutHooks()
+
+	d := clone.Dialect()
+	if d == nil || d.Name() != core.DialectSQLiteName {
+		t.Fatalf("expected SQLite dialect in UnsafeWithoutHooks clone, got %v", d)
+	}
+}

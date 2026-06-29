@@ -84,6 +84,7 @@ type BaseApp struct {
 	nonconcurrentDB     dbx.Builder
 	auxConcurrentDB     dbx.Builder
 	auxNonconcurrentDB  dbx.Builder
+	dialect             Dialect
 
 	// app event hooks
 	onBootstrap     *hook.Hook[*BootstrapEvent]
@@ -384,6 +385,35 @@ func (app *BaseApp) IsBootstrapped() bool {
 	return app.concurrentDB != nil && app.auxConcurrentDB != nil
 }
 
+// Dialect returns the cached data database dialect of the app.
+//
+// When the app is not bootstrapped (or after ResetBootstrapState()) the
+// cached dialect is nil and the method falls back to DialectForDriver,
+// which honors the PB_DATABASE_DRIVER env var and defaults to SQLite.
+func (app *BaseApp) Dialect() Dialect {
+	if app.dialect != nil {
+		return app.dialect
+	}
+
+	return DialectForDriver(driverNameFrom(app.ConcurrentDB()))
+}
+
+// driverNameFrom extracts the underlying driver name from a dbx.Builder
+// using the optional DriverName() string interface. Returns an empty
+// string when the builder is nil or doesn't expose DriverName().
+func driverNameFrom(db dbx.Builder) string {
+	if db == nil {
+		return ""
+	}
+	type driverNamer interface {
+		DriverName() string
+	}
+	if v, ok := db.(driverNamer); ok {
+		return v.DriverName()
+	}
+	return ""
+}
+
 // Bootstrap initializes the application
 // (aka. create data dir, open db connections, load settings, etc.).
 //
@@ -407,23 +437,34 @@ func (app *BaseApp) Bootstrap() error {
 			return err
 		}
 
-		if err := app.initAuxDB(); err != nil {
-			return err
-		}
+		// wrap the remaining bootstrap steps so that any failure after
+		// the data DB handles have opened cleans up the partially
+		// allocated resources (data + aux DB handles, etc.).
+		if err := func() error {
+			if err := app.initAuxDB(); err != nil {
+				return err
+			}
 
-		if err := app.initLogger(); err != nil {
-			return err
-		}
+			if err := app.initLogger(); err != nil {
+				return err
+			}
 
-		if err := app.RunSystemMigrations(); err != nil {
-			return err
-		}
+			if err := app.RunSystemMigrations(); err != nil {
+				return err
+			}
 
-		if err := app.ReloadCachedCollections(); err != nil {
-			return err
-		}
+			if err := app.ReloadCachedCollections(); err != nil {
+				return err
+			}
 
-		if err := app.ReloadSettings(); err != nil {
+			if err := app.ReloadSettings(); err != nil {
+				return err
+			}
+
+			return nil
+		}(); err != nil {
+			// release any partially opened DB resources before returning
+			_ = app.ResetBootstrapState()
 			return err
 		}
 
@@ -471,6 +512,11 @@ func (app *BaseApp) ResetBootstrapState() error {
 		}
 		*db = nil
 	}
+
+	// clear the cached data dialect so that Dialect() falls back to
+	// DialectForDriver (which honors PB_DATABASE_DRIVER env) until the
+	// app is bootstrapped again.
+	app.dialect = nil
 
 	if len(errs) > 0 {
 		return errors.Join(errs...)
@@ -1185,11 +1231,24 @@ func (app *BaseApp) initDataDB() error {
 
 	nonconcurrentDB, err := app.config.DBConnect(dbPath)
 	if err != nil {
+		// close the already opened concurrent handle before returning
+		_ = concurrentDB.Close()
 		return err
 	}
 	nonconcurrentDB.DB().SetMaxOpenConns(1)
 	nonconcurrentDB.DB().SetMaxIdleConns(1)
 	nonconcurrentDB.DB().SetConnMaxIdleTime(3 * time.Minute)
+
+	// validate that both data handles use the same driver when both
+	// expose DriverName() string.
+	concurrentDriver := concurrentDB.DriverName()
+	nonconcurrentDriver := nonconcurrentDB.DriverName()
+	if concurrentDriver != "" && nonconcurrentDriver != "" &&
+		!strings.EqualFold(concurrentDriver, nonconcurrentDriver) {
+		_ = concurrentDB.Close()
+		_ = nonconcurrentDB.Close()
+		return fmt.Errorf("data db driver mismatch: concurrent=%q nonconcurrent=%q", concurrentDriver, nonconcurrentDriver)
+	}
 
 	if app.IsDev() {
 		nonconcurrentDB.QueryLogFunc = func(ctx context.Context, t time.Duration, sql string, rows *sql.Rows, err error) {
@@ -1204,6 +1263,10 @@ func (app *BaseApp) initDataDB() error {
 
 	app.concurrentDB = concurrentDB
 	app.nonconcurrentDB = nonconcurrentDB
+
+	// cache the data dialect based on the concurrent handle driver name
+	// (DialectForDriver also honors the PB_DATABASE_DRIVER env override).
+	app.dialect = DialectForDriver(concurrentDriver)
 
 	return nil
 }
