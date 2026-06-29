@@ -1421,21 +1421,25 @@ func (app *BaseApp) registerBaseHooks() {
 	})
 
 	app.Cron().Add("__pbDBOptimize__", "0 0 * * *", func() {
-		_, execErr := app.NonconcurrentDB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
-		if execErr != nil {
-			app.Logger().Warn("Failed to run periodic PRAGMA wal_checkpoint for the main DB", slog.String("error", execErr.Error()))
-		}
-
-		_, execErr = app.AuxNonconcurrentDB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
-		if execErr != nil {
-			app.Logger().Warn("Failed to run periodic PRAGMA wal_checkpoint for the auxiliary DB", slog.String("error", execErr.Error()))
-		}
-
-		if !isMySQLDataDB(app) {
+		// main DB maintenance — route through dialect
+		if md := maintenanceDialectIfAvailable(app.Dialect()); md != nil {
+			md.PeriodicMaintenance(app.NonconcurrentDB(), app.Logger())
+		} else {
+			// SQLite fallback
+			_, execErr := app.NonconcurrentDB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+			if execErr != nil {
+				app.Logger().Warn("Failed to run periodic PRAGMA wal_checkpoint for the main DB", slog.String("error", execErr.Error()))
+			}
 			_, execErr = app.NonconcurrentDB().NewQuery("PRAGMA optimize").Execute()
 			if execErr != nil {
 				app.Logger().Warn("Failed to run periodic PRAGMA optimize", slog.String("error", execErr.Error()))
 			}
+		}
+
+		// aux DB checkpoint — always SQLite (aux DB is never MySQL)
+		_, execErr := app.AuxNonconcurrentDB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+		if execErr != nil {
+			app.Logger().Warn("Failed to run periodic PRAGMA wal_checkpoint for the auxiliary DB", slog.String("error", execErr.Error()))
 		}
 	})
 

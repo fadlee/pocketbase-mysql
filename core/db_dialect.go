@@ -2,6 +2,7 @@ package core
 
 import (
 	"fmt"
+	"log/slog"
 	"os"
 	"strings"
 
@@ -207,11 +208,104 @@ type queryViewDialect interface {
 	IsIDStringType(colType string) bool
 }
 
+// schemaSyncDialect is a local (unexported) capability interface that
+// exposes dialect-specific schema sync SQL generation.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal while the concrete dialect types
+// can be type-asserted to provide schema sync behavior.
+type schemaSyncDialect interface {
+	// AddColumnDirectly returns true if the dialect supports adding columns
+	// directly via ALTER TABLE ADD COLUMN without table recreation.
+	//
+	// For SQLite: false (requires table recreation)
+	// For MySQL: true (ALTER TABLE ADD COLUMN)
+	AddColumnDirectly() bool
+
+	// RenameColumnSQL returns a SQL statement for renaming a column and
+	// optionally changing its type in one operation.
+	//
+	// For SQLite: returns empty string (use RenameColumn helper / table recreation)
+	// For MySQL: returns "ALTER TABLE [[table]] CHANGE [[old]] [[new]] colType"
+	RenameColumnSQL(table, old, new, colType string) string
+
+	// SingleToMultiConversionSQL returns a SQL UPDATE statement for
+	// converting a single-value column to a multi-value (JSON array) column.
+	//
+	// For SQLite: uses lowercase json_valid/json_type/json_array with == comparison
+	// For MySQL: uses uppercase JSON_VALID/JSON_TYPE/JSON_ARRAY with = comparison
+	SingleToMultiConversionSQL(table, col, temp string) string
+
+	// MultiToSingleConversionSQL returns a SQL UPDATE statement for
+	// converting a multi-value (JSON array) column to a single-value column
+	// (keeping the last element).
+	//
+	// For SQLite: uses lowercase json functions with $[#-1] syntax
+	// For MySQL: uses uppercase JSON_UNQUOTE/JSON_EXTRACT/JSON_LENGTH/CONCAT
+	MultiToSingleConversionSQL(table, col, temp string) string
+
+	// DropIndexSQL returns a SQL DROP INDEX statement.
+	//
+	// For SQLite: "DROP INDEX IF EXISTS [[name]]"
+	// For MySQL: "DROP INDEX [[name]] ON [[table]]"
+	DropIndexSQL(name, table string) string
+
+	// SupportsPartialIndexes returns true if the dialect supports partial
+	// indexes (indexes with WHERE clauses).
+	//
+	// For SQLite: true
+	// For MySQL: false (WHERE clause is stripped)
+	SupportsPartialIndexes() bool
+}
+
+// maintenanceDialect is a local (unexported) capability interface that
+// exposes dialect-specific database maintenance operations.
+//
+// All methods are best-effort (no error return) and log warnings internally
+// for SQLite operations that fail. MySQL implementations are no-ops.
+//
+// The aux DB is always SQLite and is NOT covered by this interface —
+// aux DB maintenance remains unconditional SQLite.
+type maintenanceDialect interface {
+	// PostSchemaSyncOptimize runs optimization after a schema sync.
+	// For SQLite: PRAGMA optimize
+	// For MySQL: no-op
+	PostSchemaSyncOptimize(db dbx.Builder, logger *slog.Logger)
+
+	// PeriodicMaintenance runs periodic maintenance on the data DB.
+	// For SQLite: PRAGMA wal_checkpoint(TRUNCATE) + PRAGMA optimize
+	// For MySQL: no-op
+	PeriodicMaintenance(db dbx.Builder, logger *slog.Logger)
+
+	// Checkpoint runs a WAL checkpoint before backups on the data DB.
+	// For SQLite: PRAGMA wal_checkpoint(TRUNCATE)
+	// For MySQL: no-op
+	Checkpoint(db dbx.Builder, logger *slog.Logger)
+}
+
 // queryViewDialectIfAvailable returns the queryViewDialect capability if
 // the provided dialect implements it, or nil otherwise.
 func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
 	if qd, ok := d.(queryViewDialect); ok {
 		return qd
+	}
+	return nil
+}
+
+// schemaSyncDialectIfAvailable returns the schemaSyncDialect capability if
+// the provided dialect implements it, or nil otherwise.
+func schemaSyncDialectIfAvailable(d Dialect) schemaSyncDialect {
+	if sd, ok := d.(schemaSyncDialect); ok {
+		return sd
+	}
+	return nil
+}
+
+// maintenanceDialectIfAvailable returns the maintenanceDialect capability if
+// the provided dialect implements it, or nil otherwise.
+func maintenanceDialectIfAvailable(d Dialect) maintenanceDialect {
+	if md, ok := d.(maintenanceDialect); ok {
+		return md
 	}
 	return nil
 }
@@ -392,6 +486,95 @@ func (SQLiteDialect) IDCastType() string {
 // IsIDStringType implements the [queryViewDialect] interface.
 func (SQLiteDialect) IsIDStringType(colType string) bool {
 	return strings.EqualFold(colType, "TEXT")
+}
+
+// AddColumnDirectly implements the [schemaSyncDialect] interface.
+func (SQLiteDialect) AddColumnDirectly() bool {
+	return false
+}
+
+// RenameColumnSQL implements the [schemaSyncDialect] interface.
+//
+// SQLite uses the RenameColumn helper or table recreation, so an empty
+// string is returned to indicate no direct rename SQL.
+func (SQLiteDialect) RenameColumnSQL(table, old, new, colType string) string {
+	return ""
+}
+
+// SingleToMultiConversionSQL implements the [schemaSyncDialect] interface.
+func (SQLiteDialect) SingleToMultiConversionSQL(table, col, temp string) string {
+	return fmt.Sprintf(
+		`UPDATE {{%s}} set [[%s]] = (
+			CASE
+				WHEN COALESCE([[%s]], '') = ''
+				THEN '[]'
+				ELSE (
+					CASE
+						WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
+						THEN [[%s]]
+						ELSE json_array([[%s]])
+					END
+				)
+			END
+		)`,
+		table, col, temp, temp, temp, temp, temp,
+	)
+}
+
+// MultiToSingleConversionSQL implements the [schemaSyncDialect] interface.
+func (SQLiteDialect) MultiToSingleConversionSQL(table, col, temp string) string {
+	return fmt.Sprintf(
+		`UPDATE {{%s}} set [[%s]] = (
+			CASE
+				WHEN COALESCE([[%s]], '[]') = '[]'
+				THEN ''
+				ELSE (
+					CASE
+						WHEN json_valid([[%s]]) AND json_type([[%s]]) == 'array'
+						THEN COALESCE(json_extract([[%s]], '$[#-1]'), '')
+						ELSE [[%s]]
+					END
+				)
+			END
+		)`,
+		table, col, temp, temp, temp, temp, temp,
+	)
+}
+
+// DropIndexSQL implements the [schemaSyncDialect] interface.
+func (SQLiteDialect) DropIndexSQL(name, table string) string {
+	return fmt.Sprintf("DROP INDEX IF EXISTS [[%s]]", name)
+}
+
+// SupportsPartialIndexes implements the [schemaSyncDialect] interface.
+func (SQLiteDialect) SupportsPartialIndexes() bool {
+	return true
+}
+
+// PostSchemaSyncOptimize implements the [maintenanceDialect] interface.
+func (SQLiteDialect) PostSchemaSyncOptimize(db dbx.Builder, logger *slog.Logger) {
+	_, err := db.NewQuery("PRAGMA optimize").Execute()
+	if err != nil {
+		logger.Warn("Failed to run PRAGMA optimize after record table sync", slog.String("error", err.Error()))
+	}
+}
+
+// PeriodicMaintenance implements the [maintenanceDialect] interface.
+func (SQLiteDialect) PeriodicMaintenance(db dbx.Builder, logger *slog.Logger) {
+	_, err := db.NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+	if err != nil {
+		logger.Warn("Failed to run periodic PRAGMA wal_checkpoint for the main DB", slog.String("error", err.Error()))
+	}
+
+	_, err = db.NewQuery("PRAGMA optimize").Execute()
+	if err != nil {
+		logger.Warn("Failed to run periodic PRAGMA optimize", slog.String("error", err.Error()))
+	}
+}
+
+// Checkpoint implements the [maintenanceDialect] interface.
+func (SQLiteDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
+	_, _ = db.NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -694,6 +877,83 @@ func (MySQLDialect) IDCastType() string {
 func (MySQLDialect) IsIDStringType(colType string) bool {
 	rowType := strings.ToUpper(colType)
 	return strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT")
+}
+
+// AddColumnDirectly implements the [schemaSyncDialect] interface.
+func (MySQLDialect) AddColumnDirectly() bool {
+	return true
+}
+
+// RenameColumnSQL implements the [schemaSyncDialect] interface.
+func (MySQLDialect) RenameColumnSQL(table, old, new, colType string) string {
+	return fmt.Sprintf("ALTER TABLE [[%s]] CHANGE [[%s]] [[%s]] %s", table, old, new, colType)
+}
+
+// SingleToMultiConversionSQL implements the [schemaSyncDialect] interface.
+func (MySQLDialect) SingleToMultiConversionSQL(table, col, temp string) string {
+	return fmt.Sprintf(
+		`UPDATE {{%s}} set [[%s]] = (
+			CASE
+				WHEN COALESCE([[%s]], '') = ''
+				THEN JSON_ARRAY()
+				ELSE (
+					CASE
+						WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
+						THEN [[%s]]
+						ELSE JSON_ARRAY([[%s]])
+					END
+				)
+			END
+		)`,
+		table, col, temp, temp, temp, temp, temp,
+	)
+}
+
+// MultiToSingleConversionSQL implements the [schemaSyncDialect] interface.
+func (MySQLDialect) MultiToSingleConversionSQL(table, col, temp string) string {
+	return fmt.Sprintf(
+		`UPDATE {{%s}} set [[%s]] = (
+			CASE
+				WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY'
+				THEN COALESCE(JSON_UNQUOTE(JSON_EXTRACT([[%s]], CONCAT('$[', JSON_LENGTH([[%s]]) - 1, ']'))), '')
+				WHEN COALESCE([[%s]], '') = ''
+				THEN ''
+				ELSE [[%s]]
+			END
+		)`,
+		table, col, temp, temp, temp, temp, temp, temp,
+	)
+}
+
+// DropIndexSQL implements the [schemaSyncDialect] interface.
+func (MySQLDialect) DropIndexSQL(name, table string) string {
+	return fmt.Sprintf("DROP INDEX [[%s]] ON [[%s]]", name, table)
+}
+
+// SupportsPartialIndexes implements the [schemaSyncDialect] interface.
+func (MySQLDialect) SupportsPartialIndexes() bool {
+	return false
+}
+
+// PostSchemaSyncOptimize implements the [maintenanceDialect] interface.
+//
+// MySQL has no equivalent to SQLite's PRAGMA optimize.
+func (MySQLDialect) PostSchemaSyncOptimize(db dbx.Builder, logger *slog.Logger) {
+	// no-op
+}
+
+// PeriodicMaintenance implements the [maintenanceDialect] interface.
+//
+// MySQL has no equivalent to SQLite's PRAGMA wal_checkpoint or optimize.
+func (MySQLDialect) PeriodicMaintenance(db dbx.Builder, logger *slog.Logger) {
+	// no-op
+}
+
+// Checkpoint implements the [maintenanceDialect] interface.
+//
+// MySQL has no equivalent to SQLite's PRAGMA wal_checkpoint.
+func (MySQLDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
+	// no-op
 }
 
 // translateStrftimeFormat converts SQLite strftime format tokens to MySQL

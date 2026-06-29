@@ -201,3 +201,28 @@ func TestQueryViewDialectMySQL(t *testing.T) {
 	require.True(t, d.IsIDStringType("char(15)"))
 	require.False(t, d.IsIDStringType("INT"))
 }
+
+func TestSchemaSyncDialectSQLite(t *testing.T) {
+	d := core.SQLiteDialect{}
+
+	require.False(t, d.AddColumnDirectly())
+	require.Empty(t, d.RenameColumnSQL("t", "a", "b", "TEXT"))
+	require.NotEmpty(t, d.SingleToMultiConversionSQL("t", "c", "tmp"))
+	require.NotEmpty(t, d.MultiToSingleConversionSQL("t", "c", "tmp"))
+	require.Equal(t, "DROP INDEX IF EXISTS [[idx]]", d.DropIndexSQL("idx", "tbl"))
+	require.True(t, d.SupportsPartialIndexes())
+}
+
+func TestSchemaSyncDialectMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	require.True(t, d.AddColumnDirectly())
+	require.NotEmpty(t, d.RenameColumnSQL("t", "a", "b", "VARCHAR(255)"))
+	require.Contains(t, d.RenameColumnSQL("t", "a", "b", "VARCHAR(255)"), "CHANGE")
+	require.NotEmpty(t, d.SingleToMultiConversionSQL("t", "c", "tmp"))
+	require.Contains(t, d.SingleToMultiConversionSQL("t", "c", "tmp"), "JSON_ARRAY")
+	require.NotEmpty(t, d.MultiToSingleConversionSQL("t", "c", "tmp"))
+	require.Contains(t, d.MultiToSingleConversionSQL("t", "c", "tmp"), "JSON_EXTRACT")
+	require.Equal(t, "DROP INDEX [[idx]] ON [[tbl]]", d.DropIndexSQL("idx", "tbl"))
+	require.False(t, d.SupportsPartialIndexes())
+}

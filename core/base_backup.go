@@ -84,7 +84,14 @@ func (app *BaseApp) CreateBackup(ctx context.Context, name string) error {
 			return txApp.AuxRunInTransaction(func(txApp App) error {
 				// run manual checkpoint and truncate the WAL files
 				// (errors are ignored because it is not that important and the PRAGMA may not be supported by the used driver)
-				txApp.DB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+				// data DB checkpoint — route through dialect
+				if md := maintenanceDialectIfAvailable(txApp.Dialect()); md != nil {
+					md.Checkpoint(txApp.DB(), txApp.Logger())
+				} else {
+					txApp.DB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+				}
+
+				// aux DB checkpoint — always SQLite
 				txApp.AuxDB().NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
 
 				return archive.Create(txApp.DataDir(), tempPath, e.Exclude...)
