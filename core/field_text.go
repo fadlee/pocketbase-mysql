@@ -160,26 +160,18 @@ func (f *TextField) SetHidden(hidden bool) {
 
 // ColumnType implements [Field.ColumnType] interface method.
 func (f *TextField) ColumnType(app App) string {
-	if isMySQLDataDB(app) {
-		if f.PrimaryKey {
-			return "VARCHAR(15) PRIMARY KEY NOT NULL"
-		}
-
-		max := f.Max
-		if max <= 0 {
-			max = 255
-		}
-		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
-	}
+	cd := app.Dialect().(columnDialect)
 
 	if f.PrimaryKey {
-		// note: the default is just a last resort fallback to avoid empty
-		// string values in case the record was inserted with raw sql and
-		// it is not actually used when operating with the db abstraction
-		return "TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL"
+		return cd.PrimaryKeyColumnType()
 	}
 
-	return "TEXT DEFAULT '' NOT NULL"
+	max := f.Max
+	if max <= 0 {
+		max = 255
+	}
+
+	return cd.VarCharColumnType(max)
 }
 
 // PrepareValue implements [Field.PrepareValue] interface method.
