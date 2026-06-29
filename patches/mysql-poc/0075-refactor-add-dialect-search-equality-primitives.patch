@@ -1,7 +1,7 @@
 From af24bf845b4cb2a64ea173b17c22cf4803ff6ea7 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 11:28:45 +0700
-Subject: [PATCH 75/93] refactor: add dialect search equality primitives
+Subject: [PATCH 75/95] refactor: add dialect search equality primitives
 
 ---
  core/db_dialect.go                 |  75 +++++

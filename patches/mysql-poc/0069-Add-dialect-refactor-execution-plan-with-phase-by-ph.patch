@@ -1,7 +1,7 @@
 From 7d7b00f3f1879c5c2f34d15ce90ec277437a7b50 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 10:19:39 +0700
-Subject: [PATCH 69/93] Add dialect refactor execution plan with phase-by-phase
+Subject: [PATCH 69/95] Add dialect refactor execution plan with phase-by-phase
  implementation tasks, test requirements, and verification checkpoints
 
 ---

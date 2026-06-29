@@ -1,7 +1,7 @@
 From c0fb35ea38269ccbbcd0e40ea7fea7d643b197d2 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 14:35:16 +0700
-Subject: [PATCH 92/93] chore: refresh MySQL dialect patch stack
+Subject: [PATCH 92/95] chore: refresh MySQL dialect patch stack
 
 ---
  ...-document-initial-MySQL-gap-analysis.patch |     2 +-

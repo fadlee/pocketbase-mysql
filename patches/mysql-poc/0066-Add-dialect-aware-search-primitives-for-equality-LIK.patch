@@ -1,7 +1,7 @@
 From 9bac2643b8fac87290e2ea801ca0cd0c28f3b349 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 06:48:23 +0700
-Subject: [PATCH 66/93] Add dialect-aware search primitives for equality, LIKE,
+Subject: [PATCH 66/95] Add dialect-aware search primitives for equality, LIKE,
  and rowid sort operations
 
 ---

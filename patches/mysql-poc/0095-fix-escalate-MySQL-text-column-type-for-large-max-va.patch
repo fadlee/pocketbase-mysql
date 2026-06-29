@@ -1,0 +1,104 @@
+From b1004beeeaaba0c51ffe611c6f56164e9358b67d Mon Sep 17 00:00:00 2001
+From: fadlee <fad.lee@hotmail.com>
+Date: Mon, 29 Jun 2026 16:00:50 +0700
+Subject: [PATCH 95/95] fix: escalate MySQL text column type for large max
+ values
+
+VARCHAR max length is 65535 bytes in MySQL, but the practical limit
+with utf8mb4 is ~16383 characters. When a text field's max exceeds
+this limit (e.g. raw_source with max=500000), MySQL rejects the
+CREATE TABLE with Error 1074.
+
+Escalate the column type based on max:
+- max <= 16383: VARCHAR(max)
+- max <= 65535: TEXT
+- max <= 16777215: MEDIUMTEXT
+- max > 16777215: LONGTEXT
+
+TEXT-family columns cannot have DEFAULT values in MySQL, so the
+application layer supplies the empty string zero value instead.
+---
+ core/db_dialect.go      | 20 +++++++++++++++++++-
+ core/db_dialect_test.go | 30 ++++++++++++++++++++++++++++++
+ 2 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/core/db_dialect.go b/core/db_dialect.go
+index 4e7943c7..1b38fc36 100644
+--- a/core/db_dialect.go
++++ b/core/db_dialect.go
+@@ -703,8 +703,26 @@ func (MySQLDialect) Name() string {
+ }
+ 
+ // VarCharColumnType implements the [columnDialect] interface.
++//
++// MySQL has a maximum VARCHAR length of 65535 bytes, but the practical
++// limit is lower with multibyte character sets (e.g. ~16383 for utf8mb4).
++// When the requested max exceeds the VARCHAR limit, the type escalates
++// to TEXT (64KB), MEDIUMTEXT (16MB), or LONGTEXT (4GB) so that large
++// text fields (e.g. raw_source with max=500000) work without error.
++//
++// TEXT-family columns cannot have a DEFAULT value in MySQL, so the
++// application layer supplies the empty string zero value instead.
+ func (MySQLDialect) VarCharColumnType(max int) string {
+-	return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
++	switch {
++	case max <= 16383:
++		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
++	case max <= 65535:
++		return "TEXT NOT NULL"
++	case max <= 16777215:
++		return "MEDIUMTEXT NOT NULL"
++	default:
++		return "LONGTEXT NOT NULL"
++	}
+ }
+ 
+ // PrimaryKeyColumnType implements the [columnDialect] interface.
+diff --git a/core/db_dialect_test.go b/core/db_dialect_test.go
+index 68ce5d07..130b556a 100644
+--- a/core/db_dialect_test.go
++++ b/core/db_dialect_test.go
+@@ -1,6 +1,7 @@
+ package core_test
+ 
+ import (
++	"fmt"
+ 	"testing"
+ 
+ 	"github.com/pocketbase/dbx"
+@@ -293,3 +294,32 @@ func TestRelationJoinDialectMySQL(t *testing.T) {
+ 	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_CONTAINS")
+ 	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_QUOTE")
+ }
++
++func TestVarCharColumnTypeMySQL(t *testing.T) {
++	d := core.MySQLDialect{}
++
++	scenarios := []struct {
++		max      int
++		expected string
++	}{
++		{0, "VARCHAR(0) DEFAULT '' NOT NULL"},
++		{15, "VARCHAR(15) DEFAULT '' NOT NULL"},
++		{255, "VARCHAR(255) DEFAULT '' NOT NULL"},
++		{16383, "VARCHAR(16383) DEFAULT '' NOT NULL"},
++		{16384, "TEXT NOT NULL"},
++		{50000, "TEXT NOT NULL"},
++		{65535, "TEXT NOT NULL"},
++		{65536, "MEDIUMTEXT NOT NULL"},
++		{500000, "MEDIUMTEXT NOT NULL"},
++		{16777215, "MEDIUMTEXT NOT NULL"},
++		{16777216, "LONGTEXT NOT NULL"},
++		{100000000, "LONGTEXT NOT NULL"},
++	}
++
++	for _, s := range scenarios {
++		t.Run(fmt.Sprintf("max_%d", s.max), func(t *testing.T) {
++			result := d.VarCharColumnType(s.max)
++			require.Equal(t, s.expected, result)
++		})
++	}
++}
+-- 
+2.54.0.windows.1
+

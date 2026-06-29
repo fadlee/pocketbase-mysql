@@ -1,7 +1,7 @@
 From 18d167ea6d792a19494641124b6cb4da795a4bda Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 10:19:26 +0700
-Subject: [PATCH 68/93] Add finalization rule, runtime SQL decision gates, and
+Subject: [PATCH 68/95] Add finalization rule, runtime SQL decision gates, and
  expanded test/verification requirements to dialect refactor plan
 
 ---

@@ -1,7 +1,7 @@
 From b67203755b1ef32ddd842fe4634fa2be9aa717e7 Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 11:15:16 +0700
-Subject: [PATCH 74/93] refactor: route introspection queries through dialect
+Subject: [PATCH 74/95] refactor: route introspection queries through dialect
 
 ---
  core/collection_record_table_sync.go |  33 ++-------

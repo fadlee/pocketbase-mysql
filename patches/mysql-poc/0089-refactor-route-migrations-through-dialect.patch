@@ -1,7 +1,7 @@
 From af0777b6feaf9e39b380525fdbeada076aa440cf Mon Sep 17 00:00:00 2001
 From: fadlee <fad.lee@hotmail.com>
 Date: Mon, 29 Jun 2026 14:03:55 +0700
-Subject: [PATCH 89/93] refactor: route migrations through dialect
+Subject: [PATCH 89/95] refactor: route migrations through dialect
 
 ---
  core/db_dialect.go                         | 133 +++++++++++++++++++++
