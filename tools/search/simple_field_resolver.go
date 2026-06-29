@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ganigeorgiev/fexpr"
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/tools/inflector"
 	"github.com/pocketbase/pocketbase/tools/list"
@@ -55,6 +56,40 @@ type FieldResolver interface {
 	// Resolve parses the provided field and returns a properly
 	// formatted db identifier (eg. NULL, quoted column, placeholder parameter, etc.).
 	Resolve(field string) (*ResolverResult, error)
+}
+
+// TokenFunctionArg represents a single resolved argument to a token function.
+//
+// The Token field carries the original parsed token type (e.g. fexpr.TokenText,
+// fexpr.TokenNumber, fexpr.TokenIdentifier) so that dialect implementations
+// can make decisions based on the argument shape rather than inferring types
+// from the resolved SQL identifier string.
+//
+// The Literal field carries the raw token literal as provided by the filter
+// expression parser (e.g. the format string "%Y-%m-%d" or the modifier
+// "unixepoch").
+//
+// The Result field carries the resolved ResolverResult for the argument
+// (Identifier, Params, MultiMatchSubQuery, etc.).
+type TokenFunctionArg struct {
+	Token   fexpr.TokenType
+	Literal string
+	Result  *ResolverResult
+}
+
+// strftimeResolver is an optional capability interface that resolvers can
+// implement to provide dialect-specific strftime expression generation.
+//
+// When a resolver does not implement this interface, the SQLite/default
+// strftime expression is used.
+type strftimeResolver interface {
+	// StrftimeExpr returns a dialect-specific SQL expression for the
+	// strftime token function, given the resolved arguments.
+	//
+	// The returned expression string is used as the ResolverResult.Identifier.
+	// The returned params map is merged into the ResolverResult.Params.
+	// An error is returned for unsupported modifiers or format tokens.
+	StrftimeExpr(args []TokenFunctionArg) (expr string, params dbx.Params, err error)
 }
 
 // NewSimpleFieldResolver creates a new `SimpleFieldResolver` with the

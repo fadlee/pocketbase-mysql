@@ -142,6 +142,22 @@ func (r *RecordFieldResolver) RowidSortExpr(direction string) (string, error) {
 	return fmt.Sprintf("[[_rowid_]] %s", direction), nil
 }
 
+// StrftimeExpr implements the [search.strftimeResolver] interface.
+//
+// It delegates to the dialect's StrftimeExpr method if available, or
+// returns an error if the dialect doesn't support strftime.
+func (r *RecordFieldResolver) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
+	if d, ok := r.app.Dialect().(strftimeDialect); ok {
+		return d.StrftimeExpr(args)
+	}
+	// fallback for tests without a real dialect — use SQLite expression
+	identifiers := make([]string, 0, len(args))
+	for _, arg := range args {
+		identifiers = append(identifiers, arg.Result.Identifier)
+	}
+	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
+}
+
 // NewRecordFieldResolver creates and initializes a new `RecordFieldResolver`.
 func NewRecordFieldResolver(
 	app App,

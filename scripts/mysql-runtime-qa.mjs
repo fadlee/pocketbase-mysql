@@ -1573,45 +1573,36 @@ class QA {
     await this.createRecord("qa_strftime", { when: "2026-01-15 10:30:00.000Z" });
     await this.createRecord("qa_strftime", { when: "2026-06-20 14:45:00.000Z" });
 
-    // --- Test strftime filter (currently fails on MySQL) ---
-    // strftime token function has no MySQL handling — it generates
-    // strftime() which doesn't exist in MySQL.
+    // --- Test strftime filter (now works on MySQL) ---
     {
-      const err = await expectStatus(
-        "strftime year filter on MySQL (expected 400 — no MySQL strftime)",
-        400,
-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y', when)='2026'")}`)
-      );
-      this.log("Strftime spike: strftime('%Y', when) filter fails with 400 (no MySQL strftime) — confirmed");
+      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y', when)='2026'")}`, { token: true });
+      const items = res.items || [];
+      this.assert(items.length === 2, `expected 2 records with strftime('%Y', when)='2026', got ${items.length}`);
+      this.log("Strftime spike: strftime('%Y', when) filter works — returns 2 records");
     }
 
     {
-      const err = await expectStatus(
-        "strftime month filter on MySQL (expected 400)",
-        400,
-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%m', when)='01'")}`)
-      );
-      this.log("Strftime spike: strftime('%m', when) filter fails with 400 — confirmed");
+      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%m', when)='01'")}`, { token: true });
+      const items = res.items || [];
+      this.assert(items.length === 1, `expected 1 record with strftime('%m', when)='01', got ${items.length}`);
+      this.assert(items[0].when.startsWith("2026-01"), `expected January record, got ${items[0].when}`);
+      this.log("Strftime spike: strftime('%m', when) filter works — returns January record");
     }
 
     // --- Test strftime with format string containing time tokens ---
     {
-      const err = await expectStatus(
-        "strftime full datetime filter on MySQL (expected 400)",
-        400,
-        () => this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y-%m-%d %H:%M:%S', when)='2026-01-15 10:30:00'")}`)
-      );
-      this.log("Strftime spike: full datetime format fails with 400 — confirmed");
+      const res = await this.getRecords("qa_strftime", `filter=${encodeURIComponent("strftime('%Y-%m-%d %H:%M:%S', when)='2026-01-15 10:30:00'")}`, { token: true });
+      const items = res.items || [];
+      this.assert(items.length === 1, `expected 1 record with full datetime match, got ${items.length}`);
+      this.log("Strftime spike: full datetime format filter works — returns matching record");
     }
 
     this.log("Strftime spike findings:");
-    this.log("  1. strftime filter fails — token function has no MySQL handling");
-    this.log("  2. MySQL translation: strftime() → DATE_FORMAT()");
-    this.log("  3. Critical token mappings: %M→%i (minutes), %S→%s (seconds)");
-    this.log("  4. Datetime parsing: SQLite accepts 'Z' suffix, MySQL needs REPLACE/STR_TO_DATE");
-    this.log("  5. unixepoch modifier: SQLite uses modifier, MySQL needs FROM_UNIXTIME()");
-    this.log("  6. Fix: Task 8.1 will implement StrftimeExpr dialect method");
-    this.log("Strftime spike: PASSED (findings documented)");
+    this.log("  1. strftime filter works — StrftimeExpr generates MySQL DATE_FORMAT expression");
+    this.log("  2. Format tokens translated: %M→%i (minutes), %S→%s (seconds)");
+    this.log("  3. 'Z' suffix handled via REPLACE(timeValue, 'Z', '')");
+    this.log("  4. unixepoch modifier supported via FROM_UNIXTIME()");
+    this.log("Strftime spike: PASSED (strftime works on MySQL)");
   }
 
   // =========================================================================

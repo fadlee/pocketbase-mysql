@@ -9,6 +9,27 @@ import (
 
 var _ dbx.Expression = (*MultiMatchSubquery)(nil)
 
+// cloneMultiMatchSubquery creates a shallow copy of the MultiMatchSubquery
+// with cloned Params and Joins slice, so that mutations to the clone's
+// ValueIdentifier, Params, or Joins do not affect the original.
+//
+// The individual Join entries are shared (not deep-copied) because join
+// definitions are not mutated after creation.
+func cloneMultiMatchSubquery(m *MultiMatchSubquery) *MultiMatchSubquery {
+	clone := *m
+	if m.Params != nil {
+		clone.Params = make(dbx.Params, len(m.Params))
+		for k, v := range m.Params {
+			clone.Params[k] = v
+		}
+	}
+	if m.Joins != nil {
+		clone.Joins = make([]*Join, len(m.Joins))
+		copy(clone.Joins, m.Joins)
+	}
+	return &clone
+}
+
 // Join defines common fields required for a single SQL JOIN clause.
 //
 // When RawTableExpr is true, TableName is treated as a raw SQL table

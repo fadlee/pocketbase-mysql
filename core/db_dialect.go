@@ -8,6 +8,7 @@ import (
 	"github.com/pocketbase/dbx"
 	"github.com/pocketbase/pocketbase/tools/dbutils"
 	"github.com/pocketbase/pocketbase/tools/search"
+	"github.com/pocketbase/pocketbase/tools/security"
 )
 
 const (
@@ -148,6 +149,26 @@ type jsonExtractDialect interface {
 	// The expression must work for string, numeric, and null comparisons
 	// without resolver-side hacks.
 	JSONExtractExpr(column string, path string) string
+}
+
+// strftimeDialect is a local (unexported) capability interface that
+// exposes dialect-specific strftime expression generation.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal while the concrete dialect types
+// can be type-asserted to provide strftime expressions.
+type strftimeDialect interface {
+	// StrftimeExpr returns a dialect-specific SQL expression for the
+	// strftime token function, given the resolved arguments.
+	//
+	// args[0] is the format string (TokenText).
+	// args[1] is the time value (TokenText, TokenIdentifier, or TokenNumber).
+	// args[2:] are modifiers (TokenText).
+	//
+	// The returned expression string is used as the ResolverResult.Identifier.
+	// The returned params map is merged into the ResolverResult.Params.
+	// An error is returned for unsupported modifiers or format tokens.
+	StrftimeExpr(args []search.TokenFunctionArg) (expr string, params dbx.Params, err error)
 }
 
 // SQLiteDialect represents the SQLite data database dialect.
@@ -294,6 +315,18 @@ func (SQLiteDialect) JSONArrayLengthExpr(column string) string {
 // JSONExtractExpr implements the [jsonExtractDialect] interface.
 func (SQLiteDialect) JSONExtractExpr(column string, path string) string {
 	return dbutils.JSONExtract(column, path)
+}
+
+// StrftimeExpr implements the [strftimeDialect] interface.
+//
+// Returns the SQLite strftime expression using the resolved argument
+// identifiers (placeholders and column references).
+func (SQLiteDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
+	identifiers := make([]string, 0, len(args))
+	for _, arg := range args {
+		identifiers = append(identifiers, arg.Result.Identifier)
+	}
+	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -497,6 +530,127 @@ func (MySQLDialect) JSONExtractExpr(column string, path string) string {
 		column,
 		path,
 	)
+}
+
+// StrftimeExpr implements the [strftimeDialect] interface.
+//
+// MySQL doesn't have strftime(). This implementation translates the SQLite
+// format string to MySQL DATE_FORMAT tokens and wraps the time value
+// appropriately.
+//
+// Format token mapping:
+//   %Y → %Y (4-digit year)
+//   %m → %m (2-digit month)
+//   %d → %d (2-digit day)
+//   %H → %H (2-digit hour 24h)
+//   %M → %i (2-digit minute — SQLite %M is minutes, MySQL %M is month name)
+//   %S → %s (2-digit second)
+//   %f → %f (fractional seconds — MySQL returns 6 digits, SQLite returns 3)
+//
+// Supported modifiers:
+//   unixepoch — wraps time value with FROM_UNIXTIME()
+//   utc       — no-op (PocketBase stores UTC strings)
+//
+// Unsupported modifiers (localtime, timezone offsets, relative date math)
+// return an error.
+//
+// The 'Z' suffix in datetime strings is handled by REPLACE(timeValue, 'Z', '')
+// because MySQL's DATE_FORMAT doesn't parse the 'Z' suffix.
+func (MySQLDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Params, error) {
+	if len(args) < 1 {
+		return "", nil, fmt.Errorf("expected at least 1 argument")
+	}
+
+	// extract format string from the first argument's literal
+	formatStr := args[0].Literal
+
+	// translate SQLite format tokens to MySQL DATE_FORMAT tokens
+	mappedFormat := translateStrftimeFormat(formatStr)
+
+	// create a new placeholder for the translated format
+	formatPlaceholder := "strftimeFmt" + security.PseudorandomString(8)
+	params := dbx.Params{formatPlaceholder: mappedFormat}
+
+	// strftime(format) — no time value
+	if len(args) == 1 {
+		expr := fmt.Sprintf("DATE_FORMAT(UTC_TIMESTAMP(3), {:%s})", formatPlaceholder)
+		return expr, params, nil
+	}
+
+	// extract time value identifier
+	timeValueIdentifier := args[1].Result.Identifier
+
+	// process modifiers
+	hasUnixepoch := false
+	for i := 2; i < len(args); i++ {
+		mod := strings.ToLower(strings.TrimSpace(args[i].Literal))
+		switch mod {
+		case "unixepoch":
+			hasUnixepoch = true
+		case "utc":
+			// no-op, PocketBase stores UTC strings
+		case "localtime":
+			return "", nil, fmt.Errorf("[strftime] unsupported MySQL modifier %q", mod)
+		default:
+			return "", nil, fmt.Errorf("[strftime] unsupported MySQL modifier %q", mod)
+		}
+	}
+
+	// build the time value expression
+	var timeValueExpr string
+	if hasUnixepoch {
+		// numeric Unix seconds → FROM_UNIXTIME
+		timeValueExpr = fmt.Sprintf("FROM_UNIXTIME(%s)", timeValueIdentifier)
+	} else {
+		// datetime string — remove 'Z' suffix for MySQL compatibility
+		timeValueExpr = fmt.Sprintf("REPLACE(%s, 'Z', '')", timeValueIdentifier)
+	}
+
+	expr := fmt.Sprintf("DATE_FORMAT(%s, {:%s})", timeValueExpr, formatPlaceholder)
+	return expr, params, nil
+}
+
+// translateStrftimeFormat converts SQLite strftime format tokens to MySQL
+// DATE_FORMAT tokens.
+//
+// The only token that MUST be translated is %M (SQLite minutes → MySQL %i).
+// Other tokens are either identical or have compatible behavior.
+//
+// %f (fractional seconds) is left as %f. MySQL returns 6-digit microseconds
+// while SQLite returns 3-digit milliseconds. This is a documented behavior
+// difference.
+func translateStrftimeFormat(format string) string {
+	// We need to translate %M → %i but NOT touch %%M or other escaped sequences.
+	// SQLite uses %% for a literal %.
+	var result strings.Builder
+	i := 0
+	for i < len(format) {
+		if format[i] == '%' && i+1 < len(format) {
+			next := format[i+1]
+			if next == '%' {
+				// literal %, skip both characters
+				result.WriteString("%%")
+				i += 2
+				continue
+			}
+			if next == 'M' {
+				// SQLite %M = minutes → MySQL %i
+				result.WriteString("%i")
+			} else if next == 'S' {
+				// SQLite %S = seconds → MySQL %s (lowercase)
+				result.WriteString("%s")
+			} else {
+				// all other tokens are identical or compatible
+				result.WriteByte('%')
+				result.WriteByte(next)
+			}
+			i += 2
+		} else {
+			result.WriteByte(format[i])
+			i++
+		}
+	}
+	return result.String()
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.

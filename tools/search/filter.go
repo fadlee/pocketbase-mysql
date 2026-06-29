@@ -380,7 +380,7 @@ func resolveToken(token fexpr.Token, fieldResolver FieldResolver) (*ResolverResu
 		}
 
 		args, _ := token.Meta.([]fexpr.Token)
-		return fn(func(argToken fexpr.Token) (*ResolverResult, error) {
+		return fn(fieldResolver, func(argToken fexpr.Token) (*ResolverResult, error) {
 			return resolveToken(argToken, fieldResolver)
 		}, args...)
 	}
