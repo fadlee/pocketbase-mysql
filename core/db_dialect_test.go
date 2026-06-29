@@ -226,3 +226,55 @@ func TestSchemaSyncDialectMySQL(t *testing.T) {
 	require.Equal(t, "DROP INDEX [[idx]] ON [[tbl]]", d.DropIndexSQL("idx", "tbl"))
 	require.False(t, d.SupportsPartialIndexes())
 }
+
+func TestMigrationDialectSQLite(t *testing.T) {
+	d := core.SQLiteDialect{}
+
+	require.NotEmpty(t, d.CollectionsTableDDL())
+	require.Contains(t, d.CollectionsTableDDL(), "randomblob")
+	require.Contains(t, d.CollectionsTableDDL(), "strftime")
+	require.Contains(t, d.CollectionsTableDDL(), "idx__collections_type")
+	require.NotEmpty(t, d.ParamsTableDDL())
+	require.Contains(t, d.ParamsTableDDL(), "randomblob")
+	require.Equal(t, "INTEGER", d.MigrationAppliedColumnType())
+}
+
+func TestMigrationDialectMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	require.NotEmpty(t, d.CollectionsTableDDL())
+	require.Contains(t, d.CollectionsTableDDL(), "VARCHAR(15)")
+	require.Contains(t, d.CollectionsTableDDL(), "idx__collections_type")
+	require.NotEmpty(t, d.ParamsTableDDL())
+	require.Contains(t, d.ParamsTableDDL(), "VARCHAR(15)")
+	require.Equal(t, "BIGINT", d.MigrationAppliedColumnType())
+}
+
+// noopDialect is a minimal Dialect that does not implement migrationDialect,
+// used to verify the exported helper fallback behavior.
+type noopDialect struct{}
+
+func (noopDialect) Name() string { return "noop" }
+
+func TestMigrationDialectHelpers(t *testing.T) {
+	// SQLite helper
+	sqliteDDL := core.CollectionsTableDDLFor(core.SQLiteDialect{})
+	require.Contains(t, sqliteDDL, "randomblob")
+
+	// MySQL helper
+	mysqlDDL := core.CollectionsTableDDLFor(core.MySQLDialect{})
+	require.Contains(t, mysqlDDL, "VARCHAR")
+
+	// Params helpers
+	require.Contains(t, core.ParamsTableDDLFor(core.SQLiteDialect{}), "randomblob")
+	require.Contains(t, core.ParamsTableDDLFor(core.MySQLDialect{}), "VARCHAR")
+
+	// Applied column type helpers
+	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(core.SQLiteDialect{}))
+	require.Equal(t, "BIGINT", core.MigrationAppliedColumnTypeFor(core.MySQLDialect{}))
+
+	// Fallback (dialect that doesn't implement migrationDialect)
+	noopDDL := core.CollectionsTableDDLFor(noopDialect{})
+	require.NotEmpty(t, noopDDL)
+	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(noopDialect{}))
+}

@@ -264,11 +264,7 @@ func (r *MigrationsRunner) initMigrationsTable() error {
 }
 
 func migrationAppliedColumnType(app App) string {
-	if db, ok := app.ConcurrentDB().(interface{ DriverName() string }); ok && db.DriverName() == "mysql" {
-		return "BIGINT"
-	}
-
-	return "INTEGER"
+	return MigrationAppliedColumnTypeFor(app.Dialect())
 }
 
 func (r *MigrationsRunner) isMigrationApplied(txApp App, file string) bool {

@@ -283,6 +283,27 @@ type maintenanceDialect interface {
 	Checkpoint(db dbx.Builder, logger *slog.Logger)
 }
 
+// migrationDialect is a local (unexported) capability interface that
+// exposes dialect-specific system migration SQL.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal.
+type migrationDialect interface {
+	// CollectionsTableDDL returns the complete DDL for the _collections
+	// system table, including any index creation statements.
+	CollectionsTableDDL() string
+
+	// ParamsTableDDL returns the complete DDL for the _params system table.
+	ParamsTableDDL() string
+
+	// MigrationAppliedColumnType returns the SQL column type for the
+	// _migrations.applied column.
+	//
+	// For SQLite: "INTEGER"
+	// For MySQL: "BIGINT"
+	MigrationAppliedColumnType() string
+}
+
 // queryViewDialectIfAvailable returns the queryViewDialect capability if
 // the provided dialect implements it, or nil otherwise.
 func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
@@ -575,6 +596,47 @@ func (SQLiteDialect) PeriodicMaintenance(db dbx.Builder, logger *slog.Logger) {
 // Checkpoint implements the [maintenanceDialect] interface.
 func (SQLiteDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
 	_, _ = db.NewQuery("PRAGMA wal_checkpoint(TRUNCATE)").Execute()
+}
+
+// CollectionsTableDDL implements the [migrationDialect] interface.
+func (SQLiteDialect) CollectionsTableDDL() string {
+	return `
+		CREATE TABLE IF NOT EXISTS {{_collections}} (
+			[[id]]         TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+			[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+			[[type]]       TEXT DEFAULT "base" NOT NULL,
+			[[name]]       TEXT UNIQUE NOT NULL,
+			[[fields]]     JSON DEFAULT "[]" NOT NULL,
+			[[indexes]]    JSON DEFAULT "[]" NOT NULL,
+			[[listRule]]   TEXT DEFAULT NULL,
+			[[viewRule]]   TEXT DEFAULT NULL,
+			[[createRule]] TEXT DEFAULT NULL,
+			[[updateRule]] TEXT DEFAULT NULL,
+			[[deleteRule]] TEXT DEFAULT NULL,
+			[[options]]    JSON DEFAULT "{}" NOT NULL,
+			[[created]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
+			[[updated]]    TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
+		);
+
+		CREATE INDEX IF NOT EXISTS idx__collections_type on {{_collections}} ([[type]]);
+	`
+}
+
+// ParamsTableDDL implements the [migrationDialect] interface.
+func (SQLiteDialect) ParamsTableDDL() string {
+	return `
+		CREATE TABLE IF NOT EXISTS {{_params}} (
+			[[id]]      TEXT PRIMARY KEY DEFAULT ('r'||lower(hex(randomblob(7)))) NOT NULL,
+			[[value]]   JSON DEFAULT NULL,
+			[[created]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL,
+			[[updated]] TEXT DEFAULT (strftime('%Y-%m-%d %H:%M:%fZ')) NOT NULL
+		);
+	`
+}
+
+// MigrationAppliedColumnType implements the [migrationDialect] interface.
+func (SQLiteDialect) MigrationAppliedColumnType() string {
+	return "INTEGER"
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -956,6 +1018,47 @@ func (MySQLDialect) Checkpoint(db dbx.Builder, logger *slog.Logger) {
 	// no-op
 }
 
+// CollectionsTableDDL implements the [migrationDialect] interface.
+func (MySQLDialect) CollectionsTableDDL() string {
+	return `
+		CREATE TABLE {{_collections}} (
+			[[id]]         VARCHAR(15) PRIMARY KEY NOT NULL,
+			[[system]]     BOOLEAN DEFAULT FALSE NOT NULL,
+			[[type]]       VARCHAR(255) DEFAULT "base" NOT NULL,
+			[[name]]       VARCHAR(255) UNIQUE NOT NULL,
+			[[fields]]     JSON NOT NULL,
+			[[indexes]]    JSON NOT NULL,
+			[[listRule]]   TEXT DEFAULT NULL,
+			[[viewRule]]   TEXT DEFAULT NULL,
+			[[createRule]] TEXT DEFAULT NULL,
+			[[updateRule]] TEXT DEFAULT NULL,
+			[[deleteRule]] TEXT DEFAULT NULL,
+			[[options]]    JSON NOT NULL,
+			[[created]]    VARCHAR(255) DEFAULT "" NOT NULL,
+			[[updated]]    VARCHAR(255) DEFAULT "" NOT NULL
+		);
+
+		CREATE INDEX idx__collections_type on {{_collections}} ([[type]]);
+	`
+}
+
+// ParamsTableDDL implements the [migrationDialect] interface.
+func (MySQLDialect) ParamsTableDDL() string {
+	return `
+		CREATE TABLE {{_params}} (
+			[[id]]      VARCHAR(15) PRIMARY KEY NOT NULL,
+			[[value]]   JSON DEFAULT NULL,
+			[[created]] VARCHAR(255) DEFAULT "" NOT NULL,
+			[[updated]] VARCHAR(255) DEFAULT "" NOT NULL
+		);
+	`
+}
+
+// MigrationAppliedColumnType implements the [migrationDialect] interface.
+func (MySQLDialect) MigrationAppliedColumnType() string {
+	return "BIGINT"
+}
+
 // translateStrftimeFormat converts SQLite strftime format tokens to MySQL
 // DATE_FORMAT tokens.
 //
@@ -1028,4 +1131,34 @@ func IsMySQLDataDB(app App) bool {
 
 func jsonArrayColumnType(app App) string {
 	return app.Dialect().(columnDialect).JSONArrayColumnType()
+}
+
+// CollectionsTableDDLFor returns the system _collections table DDL for the
+// provided dialect, falling back to the SQLite default when the dialect
+// does not implement the migrationDialect capability.
+func CollectionsTableDDLFor(d Dialect) string {
+	if md, ok := d.(migrationDialect); ok {
+		return md.CollectionsTableDDL()
+	}
+	return SQLiteDialect{}.CollectionsTableDDL()
+}
+
+// ParamsTableDDLFor returns the system _params table DDL for the provided
+// dialect, falling back to the SQLite default when the dialect does not
+// implement the migrationDialect capability.
+func ParamsTableDDLFor(d Dialect) string {
+	if md, ok := d.(migrationDialect); ok {
+		return md.ParamsTableDDL()
+	}
+	return SQLiteDialect{}.ParamsTableDDL()
+}
+
+// MigrationAppliedColumnTypeFor returns the _migrations.applied column type
+// for the provided dialect, falling back to "INTEGER" (SQLite default) when
+// the dialect does not implement the migrationDialect capability.
+func MigrationAppliedColumnTypeFor(d Dialect) string {
+	if md, ok := d.(migrationDialect); ok {
+		return md.MigrationAppliedColumnType()
+	}
+	return "INTEGER"
 }
