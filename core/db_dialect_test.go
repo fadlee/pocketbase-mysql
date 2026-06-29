@@ -21,7 +21,7 @@ func TestEnvForcedMySQLBootstrapWithSQLiteTestApp(t *testing.T) {
 	require.NoError(t, err)
 	defer app.Cleanup()
 
-	require.True(t, core.IsMySQLDataDB(app))
+	require.Equal(t, core.DialectMySQLName, app.Dialect().Name())
 }
 
 func TestDialectForDriver(t *testing.T) {
@@ -277,4 +277,21 @@ func TestMigrationDialectHelpers(t *testing.T) {
 	noopDDL := core.CollectionsTableDDLFor(noopDialect{})
 	require.NotEmpty(t, noopDDL)
 	require.Equal(t, "INTEGER", core.MigrationAppliedColumnTypeFor(noopDialect{}))
+}
+
+func TestRelationJoinDialectSQLite(t *testing.T) {
+	d := core.SQLiteDialect{}
+
+	require.False(t, d.UseJSONContainsForMultiRelations())
+	require.Equal(t, "a = b", d.RelationValueEqualsExpr("a", "b"))
+	require.Empty(t, d.RelationArrayContainsExpr("a", "b"))
+}
+
+func TestRelationJoinDialectMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	require.True(t, d.UseJSONContainsForMultiRelations())
+	require.Equal(t, "BINARY a = BINARY b", d.RelationValueEqualsExpr("a", "b"))
+	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_CONTAINS")
+	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_QUOTE")
 }

@@ -59,19 +59,29 @@ type runner struct {
 }
 
 func relationValueEquals(resolver *RecordFieldResolver, leftIdentifier string, rightIdentifier string) string {
-	if isMySQLDataDB(resolver.app) {
-		return fmt.Sprintf("BINARY %s = BINARY %s", leftIdentifier, rightIdentifier)
+	if d := relationJoinDialectIfAvailable(resolver.app.Dialect()); d != nil {
+		return d.RelationValueEqualsExpr(leftIdentifier, rightIdentifier)
 	}
 
 	return fmt.Sprintf("%s = %s", leftIdentifier, rightIdentifier)
 }
 
 func relationArrayContainsIdentifier(resolver *RecordFieldResolver, jsonArrayIdentifier string, idIdentifier string) string {
-	if isMySQLDataDB(resolver.app) {
-		return fmt.Sprintf("JSON_CONTAINS(%s, JSON_QUOTE(%s))", jsonArrayIdentifier, idIdentifier)
+	if d := relationJoinDialectIfAvailable(resolver.app.Dialect()); d != nil {
+		return d.RelationArrayContainsExpr(jsonArrayIdentifier, idIdentifier)
 	}
 
 	return ""
+}
+
+// jsonEachColumnExpr returns the dialect-aware JSONEach column expression
+// for the provided field name, falling back to dbutils.JSONEach when no
+// dialect is available.
+func jsonEachColumnExpr(resolver *RecordFieldResolver, fieldName string) string {
+	if d := resolver.jsonEachDialectIfAvailable(); d != nil {
+		return d.JSONEachColumnExpr(fieldName)
+	}
+	return dbutils.JSONEach(fieldName)
 }
 
 func (r *runner) run() (*search.ResolverResult, error) {
@@ -608,14 +618,14 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 			} else {
 				jeAlias := "__je_" + newTableAlias
 				var on dbx.Expression
-				if isMySQLDataDB(r.resolver.app) {
+				if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
 					on = dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias+"."+cleanBackFieldName+"]]", "[["+r.activeTableAlias+".id]]"))
 				} else {
 					on = dbx.NewExp(fmt.Sprintf(
 						"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
 						r.activeTableAlias,
 						jeAlias,
-						dbutils.JSONEach(newTableAlias+"."+cleanBackFieldName),
+						jsonEachColumnExpr(r.resolver, newTableAlias+"."+cleanBackFieldName),
 						jeAlias,
 					))
 				}
@@ -660,7 +670,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 						TableName:  newCollectionName,
 						TableAlias: newTableAlias2,
 						On: func() dbx.Expression {
-							if isMySQLDataDB(r.resolver.app) {
+							if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
 								return dbx.NewExp(relationArrayContainsIdentifier(r.resolver, "[["+newTableAlias2+"."+cleanBackFieldName+"]]", "[["+r.multiMatchActiveTableAlias+".id]]"))
 							}
 
@@ -668,7 +678,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 								"[[%s.id]] IN (SELECT [[%s.value]] FROM %s {{%s}})",
 								r.multiMatchActiveTableAlias,
 								jeAlias2,
-								dbutils.JSONEach(newTableAlias2+"."+cleanBackFieldName),
+								jsonEachColumnExpr(r.resolver, newTableAlias2+"."+cleanBackFieldName),
 								jeAlias2,
 							))
 						}(),
@@ -723,7 +733,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 				return nil, err
 			}
 		} else {
-			if isMySQLDataDB(r.resolver.app) {
+			if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
 				err := r.resolver.registerJoin(
 					inflector.Columnify(newCollectionName),
 					newTableAlias,
@@ -736,10 +746,10 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 				jeAlias := "__je_" + newTableAlias
 
 				var onClause dbx.Expression
-				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
-					onClause = d.JSONEachOnClause()
+				if jed := r.resolver.jsonEachDialectIfAvailable(); jed != nil {
+					onClause = jed.JSONEachOnClause()
 				}
-				err := r.resolver.registerJoinExpr(dbutils.JSONEach(prefixedFieldName), jeAlias, onClause)
+				err := r.resolver.registerJoinExpr(jsonEachColumnExpr(r.resolver, prefixedFieldName), jeAlias, onClause)
 				if err != nil {
 					return nil, err
 				}
@@ -779,7 +789,7 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 				},
 			)
 		} else {
-			if isMySQLDataDB(r.resolver.app) {
+			if d := relationJoinDialectIfAvailable(r.resolver.app.Dialect()); d != nil && d.UseJSONContainsForMultiRelations() {
 				r.multiMatch.Joins = append(
 					r.multiMatch.Joins,
 					&search.Join{
@@ -791,13 +801,13 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 			} else {
 				jeAlias2 := r.multiMatchActiveTableAlias + "_" + cleanFieldName + "_je"
 				var mmOnClause dbx.Expression
-				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
-					mmOnClause = d.JSONEachOnClause()
+				if jed := r.resolver.jsonEachDialectIfAvailable(); jed != nil {
+					mmOnClause = jed.JSONEachOnClause()
 				}
 				r.multiMatch.Joins = append(
 					r.multiMatch.Joins,
 					&search.Join{
-						TableName:    dbutils.JSONEach(prefixedFieldName2),
+						TableName:    jsonEachColumnExpr(r.resolver, prefixedFieldName2),
 						TableAlias:   jeAlias2,
 						On:           mmOnClause,
 						RawTableExpr: true,
@@ -883,7 +893,7 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 		if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
 			onClause = d.JSONEachOnClause()
 		}
-		err := r.resolver.registerJoinExpr(dbutils.JSONEach(jePair), jeAlias, onClause)
+		err := r.resolver.registerJoinExpr(jsonEachColumnExpr(r.resolver, jePair), jeAlias, onClause)
 		if err != nil {
 			return nil, err
 		}
@@ -901,7 +911,7 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 			jeAlias2 := "__je_" + r.multiMatchActiveTableAlias + "_" + cleanFieldName + r.resolver.joinAliasSuffix
 
 			r.multiMatch.Joins = append(r.multiMatch.Joins, &search.Join{
-				TableName:    dbutils.JSONEach(jePair2),
+				TableName:    jsonEachColumnExpr(r.resolver, jePair2),
 				TableAlias:   jeAlias2,
 				On:           onClause,
 				RawTableExpr: true,

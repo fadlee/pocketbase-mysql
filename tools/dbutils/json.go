@@ -2,27 +2,15 @@ package dbutils
 
 import (
 	"fmt"
-	"os"
 	"strings"
 )
 
-// JSONEach returns JSON_EACH SQLite string expression with
+// JSONEach returns the json_each SQLite string expression with
 // some normalizations for non-json columns.
 //
-// Transitional: this helper still checks PB_DATABASE_DRIVER for unmigrated
-// call sites in core/view.go, core/record_query_expand.go, and
-// core/record_model.go. The dialect methods (SQLiteDialect.JSONEachColumnExpr,
-// MySQLDialect.JSONEachColumnExpr) do NOT use this helper and are
-// env-var-independent. The env var check will be removed in Task 11.1
-// once all call sites are migrated to use the dialect.
+// This is a SQLite/default helper. Call sites that need dialect-aware
+// behavior should use the jsonEachDialect capability interface instead.
 func JSONEach(column string) string {
-	if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
-		return fmt.Sprintf(
-			`JSON_TABLE(CASE WHEN JSON_VALID([[%s]]) AND JSON_TYPE([[%s]]) = 'ARRAY' THEN [[%s]] ELSE JSON_ARRAY([[%s]]) END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
-			column, column, column, column,
-		)
-	}
-
 	// note: we are not using the new and shorter "if(x,y)" syntax for
 	// compatibility with custom drivers that use older SQLite version
 	return fmt.Sprintf(

@@ -1531,9 +1531,13 @@ func cascadeRecordDelete(app App, mainRecord *Record, refs map[*Collection][]Fie
 			if opt, ok := field.(MultiValuer); !ok || !opt.IsMultiple() {
 				query.AndWhere(dbx.HashExp{prefixedFieldName: mainRecord.Id})
 			} else {
+				jsonEachExpr := dbutils.JSONEach(prefixedFieldName)
+				if d, ok := app.Dialect().(jsonEachDialect); ok {
+					jsonEachExpr = d.JSONEachColumnExpr(prefixedFieldName)
+				}
 				query.AndWhere(dbx.Exists(dbx.NewExp(fmt.Sprintf(
 					`SELECT 1 FROM %s {{__je__}} WHERE [[__je__.value]]={:jevalue}`,
-					dbutils.JSONEach(prefixedFieldName),
+					jsonEachExpr,
 				), dbx.Params{
 					"jevalue": mainRecord.Id,
 				})))

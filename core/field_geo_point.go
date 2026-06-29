@@ -109,7 +109,7 @@ func (f *GeoPointField) SetHidden(hidden bool) {
 func (f *GeoPointField) ColumnType(app App) string {
 	// MySQL disallows literal DEFAULT values on JSON columns; the zero
 	// value ({"lon":0,"lat":0}) is supplied at the application layer
-	// (see PrepareValue), mirroring jsonArrayColumnType.
+	// (see PrepareValue), mirroring the dialect's JSON column type handling.
 	return app.Dialect().(columnDialect).JSONValueColumnType(`{"lon":0,"lat":0}`)
 }
 

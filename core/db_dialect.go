@@ -26,7 +26,7 @@ const (
 // Dialect describes the SQL dialect used by the app's data database.
 //
 // It is intentionally minimal (only exposing Name()) and is meant to be
-// used as a replacement for the scattered isMySQLDataDB conditionals.
+// used as a replacement for the scattered driver-name conditionals.
 type Dialect interface {
 	Name() string
 }
@@ -304,6 +304,35 @@ type migrationDialect interface {
 	MigrationAppliedColumnType() string
 }
 
+// relationJoinDialect is a local (unexported) capability interface that
+// exposes dialect-specific relation join SQL generation.
+//
+// The key difference is that MySQL uses JSON_CONTAINS for multi-value
+// relation joins (single join with array membership check), while SQLite
+// uses json_each subquery expansion (two joins — raw table + equality).
+type relationJoinDialect interface {
+	// UseJSONContainsForMultiRelations returns true if the dialect uses
+	// JSON_CONTAINS for multi-value relation joins.
+	//
+	// For SQLite: false (uses json_each subquery expansion)
+	// For MySQL: true (uses JSON_CONTAINS in ON clause)
+	UseJSONContainsForMultiRelations() bool
+
+	// RelationValueEqualsExpr returns a SQL expression for comparing two
+	// relation values for equality.
+	//
+	// For SQLite: "left = right"
+	// For MySQL: "BINARY left = BINARY right"
+	RelationValueEqualsExpr(left, right string) string
+
+	// RelationArrayContainsExpr returns a SQL expression for checking if
+	// an array column contains a value.
+	//
+	// For MySQL: "JSON_CONTAINS(arrayCol, JSON_QUOTE(idCol))"
+	// For SQLite: "" (uses json_each subquery instead)
+	RelationArrayContainsExpr(arrayCol, idCol string) string
+}
+
 // queryViewDialectIfAvailable returns the queryViewDialect capability if
 // the provided dialect implements it, or nil otherwise.
 func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
@@ -327,6 +356,15 @@ func schemaSyncDialectIfAvailable(d Dialect) schemaSyncDialect {
 func maintenanceDialectIfAvailable(d Dialect) maintenanceDialect {
 	if md, ok := d.(maintenanceDialect); ok {
 		return md
+	}
+	return nil
+}
+
+// relationJoinDialectIfAvailable returns the relationJoinDialect capability if
+// the provided dialect implements it, or nil otherwise.
+func relationJoinDialectIfAvailable(d Dialect) relationJoinDialect {
+	if rjd, ok := d.(relationJoinDialect); ok {
+		return rjd
 	}
 	return nil
 }
@@ -637,6 +675,23 @@ func (SQLiteDialect) ParamsTableDDL() string {
 // MigrationAppliedColumnType implements the [migrationDialect] interface.
 func (SQLiteDialect) MigrationAppliedColumnType() string {
 	return "INTEGER"
+}
+
+// UseJSONContainsForMultiRelations implements the [relationJoinDialect] interface.
+func (SQLiteDialect) UseJSONContainsForMultiRelations() bool {
+	return false
+}
+
+// RelationValueEqualsExpr implements the [relationJoinDialect] interface.
+func (SQLiteDialect) RelationValueEqualsExpr(left, right string) string {
+	return fmt.Sprintf("%s = %s", left, right)
+}
+
+// RelationArrayContainsExpr implements the [relationJoinDialect] interface.
+//
+// SQLite uses json_each subquery expansion instead of JSON_CONTAINS.
+func (SQLiteDialect) RelationArrayContainsExpr(arrayCol, idCol string) string {
+	return ""
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -1059,6 +1114,21 @@ func (MySQLDialect) MigrationAppliedColumnType() string {
 	return "BIGINT"
 }
 
+// UseJSONContainsForMultiRelations implements the [relationJoinDialect] interface.
+func (MySQLDialect) UseJSONContainsForMultiRelations() bool {
+	return true
+}
+
+// RelationValueEqualsExpr implements the [relationJoinDialect] interface.
+func (MySQLDialect) RelationValueEqualsExpr(left, right string) string {
+	return fmt.Sprintf("BINARY %s = BINARY %s", left, right)
+}
+
+// RelationArrayContainsExpr implements the [relationJoinDialect] interface.
+func (MySQLDialect) RelationArrayContainsExpr(arrayCol, idCol string) string {
+	return fmt.Sprintf("JSON_CONTAINS(%s, JSON_QUOTE(%s))", arrayCol, idCol)
+}
+
 // translateStrftimeFormat converts SQLite strftime format tokens to MySQL
 // DATE_FORMAT tokens.
 //
@@ -1114,23 +1184,6 @@ func DialectForDriver(driverName string) Dialect {
 	}
 
 	return SQLiteDialect{}
-}
-
-func isMySQLDataDB(app App) bool {
-	return IsMySQLDataDB(app)
-}
-
-func IsMySQLDataDB(app App) bool {
-	if strings.EqualFold(os.Getenv(envDatabaseDriver), "mysql") {
-		return true
-	}
-
-	db, ok := app.ConcurrentDB().(interface{ DriverName() string })
-	return ok && strings.EqualFold(db.DriverName(), "mysql")
-}
-
-func jsonArrayColumnType(app App) string {
-	return app.Dialect().(columnDialect).JSONArrayColumnType()
 }
 
 // CollectionsTableDDLFor returns the system _collections table DDL for the
