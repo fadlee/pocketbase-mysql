@@ -275,9 +275,7 @@ func (MySQLDialect) HasTableQuery() string {
 
 // ViewsQuery implements the [introspectionDialect] interface.
 func (MySQLDialect) ViewsQuery() string {
-	return `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
-			FROM information_schema.VIEWS
-			WHERE TABLE_SCHEMA = DATABASE()`
+	return "SELECT TABLE_NAME AS name, VIEW_DEFINITION AS `sql` FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE()"
 }
 
 // IndexOwnerQuery implements the [introspectionDialect] interface.
