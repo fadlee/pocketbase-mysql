@@ -27,6 +27,21 @@ Important scope notes:
 - The fork currently targets verified MySQL runtime compatibility for the covered features below.
 - Auxiliary/log DB still follows the existing SQLite path during the PoC.
 
+## Dialect Abstraction
+
+As of the dialect refactor, MySQL-specific behavior is no longer scattered across the codebase as `isMySQLDataDB()` conditionals. Instead, a `core.Dialect` interface with narrow capability methods routes all data-DB SQL through `app.Dialect()`.
+
+### Public API changes
+
+- **`core.App` interface** now requires a `Dialect() core.Dialect` method. External code that manually implements `core.App` must add this method or embed `*core.BaseApp`.
+- **`tools/search.TokenFunctions`** callable signature changed. Token functions now receive a `FieldResolver` as the first parameter so they can access dialect capabilities.
+- **`tools/dbutils.JSONEach`, `JSONExtract`, `JSONArrayLength`** are now SQLite/default helpers. They no longer check `PB_DATABASE_DRIVER` and always return SQLite expressions. Call sites that need dialect-aware behavior use the `core.Dialect` capability interfaces instead.
+
+### MySQL requirements
+
+- MySQL JSON_TABLE support requires **Oracle MySQL 8.0+**. MariaDB is not supported unless separately implemented and tested.
+- The `PB_DATABASE_DRIVER=mysql` env var is still used at boot time to select the MySQL dialect, but it is no longer read at individual call sites.
+
 ## Branch Strategy
 
 Recommended branch layout for this fork:

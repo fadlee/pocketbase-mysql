@@ -134,13 +134,14 @@ GitHub container publishing:
 
 ## Refactor Boundaries
 
-Keep MySQL-specific code behind small seams where possible:
+MySQL-specific behavior is routed through a `core.Dialect` interface rather than scattered conditionals:
 
-- `core/db_dialect.go`: data DB driver detection and environment constants.
+- `core/db_dialect.go` exports the `Dialect` interface, `SQLiteDialect`, `MySQLDialect`, `DialectForDriver()`, and exported helper functions (`CollectionsTableDDLFor`, `ParamsTableDDLFor`, `MigrationAppliedColumnTypeFor`).
+- The dialect uses narrow unexported capability interfaces (`columnDialect`, `introspectionDialect`, `equalityDialect`, `rowidDialect`, `jsonEachDialect`, `jsonLengthDialect`, `jsonExtractDialect`, `strftimeDialect`, `queryViewDialect`, `schemaSyncDialect`, `maintenanceDialect`, `migrationDialect`, `relationJoinDialect`) that are type-asserted at call sites via `app.Dialect()`.
+- Both `SQLiteDialect` and `MySQLDialect` implement all capability interfaces.
 - `core/db_connect.go`: MySQL data DB routing; auxiliary DB remains SQLite for the PoC.
-- `core/db_table.go`: data DB table, column, and index metadata lookups.
-- `core/collection_validate.go`: index-name validation metadata lookup.
-- `core/collection_record_table_sync.go` and `core/base.go`: SQLite-only maintenance such as `PRAGMA optimize`.
-- `tools/search/filter.go` plus `core/record_field_resolver.go`: SQL fragments that need dialect-specific escaping.
+- `tools/search/filter.go` plus `core/record_field_resolver.go`: SQL fragments that need dialect-specific escaping use the `equalityDialect` capability.
+
+New MySQL-specific behavior should be added as a new capability method on the appropriate dialect interface in `core/db_dialect.go`, not as an `isMySQLDataDB` conditional. The `isMySQLDataDB` and `IsMySQLDataDB` functions have been removed and should not be reintroduced.
 
 Do not broaden the abstraction prematurely. Migration branching, field DDL differences, and partial-index normalization are still PoC seams and should be moved only when the relevant behavior has enough QA coverage.

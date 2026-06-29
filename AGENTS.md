@@ -23,7 +23,7 @@ When upgrading to a new upstream PocketBase version:
 
 1. **Export patches first** — run `node scripts/export-mysql-patches.mjs <current-base>` before switching branches.
 
-2. **Scan new migrations for SQLite-specific code** — grep for `sqlite_master`, `sqlite_schema`, `PRAGMA`, `randomblob`, `strftime`, `_rowid_`. Add MySQL early-return guards where needed.
+2. **Scan new migrations for SQLite-specific code** — grep for `sqlite_master`, `sqlite_schema`, `PRAGMA`, `randomblob`, `strftime`, `_rowid_`. Add dialect early-return guards (`txApp.Dialect().Name() != core.DialectSQLiteName`) where needed.
 
 3. **Skip `ui/dist` conflicts during replay** — bundle hashes always differ. Skip patches that only conflict in `ui/dist`, then run `cd ui && npm run build` once at the end.
 
@@ -39,16 +39,18 @@ When upgrading to a new upstream PocketBase version:
 
 ## MySQL-Specific Patterns
 
-- New upstream migrations that query `sqlite_master` or `sqlite_schema` need an early return:
+- New upstream migrations that query `sqlite_master` or `sqlite_schema` need an early return for non-SQLite dialects:
   ```go
-  if strings.EqualFold(os.Getenv("PB_DATABASE_DRIVER"), "mysql") {
+  if txApp.Dialect().Name() != core.DialectSQLiteName {
       return nil
   }
   ```
-- Sort expressions using `_rowid_` need a MySQL fallback resolving to `id`.
-- `LIKE` filter escaping differs between SQLite and MySQL.
-- Partial indexes (`WHERE` clause in `CREATE INDEX`) are not supported in MySQL — use regular indexes.
+- Sort expressions using `_rowid_` are handled by the dialect's `rowidDialect` capability — SQLite uses `_rowid_`, MySQL resolves to `id`.
+- `LIKE` filter escaping differs between SQLite and MySQL and is handled by the `equalityDialect` capability.
+- Partial indexes (`WHERE` clause in `CREATE INDEX`) are not supported in MySQL — the `schemaSyncDialect` capability strips the WHERE clause for MySQL.
 - UI source should use portable sort fields (`-created,-id`) instead of `@rowid`.
+- New MySQL-specific SQL behavior should be added as a method on the appropriate dialect capability interface in `core/db_dialect.go`, not as a scattered `isMySQLDataDB` conditional.
+- `tools/dbutils.JSONEach`, `JSONExtract`, and `JSONArrayLength` are SQLite/default helpers. Use `app.Dialect()` capability methods for dialect-aware behavior.
 
 ## Build & Test
 
@@ -81,7 +83,7 @@ git switch --create mysql/rebase-v0.39.5 v0.39.5
 
 # 3. Scan new migrations for SQLite-specific code
 git diff v0.39.4..v0.39.5 -- migrations/ | grep -i "sqlite\|pragma\|rowid"
-# Add MySQL early-return guards where needed
+# Add dialect early-return guards where needed
 
 # 4. Apply patch stack
 git am --3way patches/mysql-poc/*.patch
