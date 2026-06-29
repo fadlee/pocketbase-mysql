@@ -109,6 +109,26 @@ type jsonEachDialect interface {
 	JSONEachOnClause() dbx.Expression
 }
 
+// jsonLengthDialect is a local (unexported) capability interface that
+// exposes dialect-specific JSON array length expression generation.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal while the concrete dialect types
+// can be type-asserted to provide JSON array length expressions.
+type jsonLengthDialect interface {
+	// JSONArrayLengthExpr returns a SQL expression that computes the length
+	// of a JSON array column with normalization for non-array values.
+	//
+	// For SQLite: json_array_length(CASE WHEN ... END)
+	// For MySQL: JSON_LENGTH(CASE WHEN ... END)
+	//
+	// The expression must return:
+	//   - array length for JSON arrays
+	//   - 0 for empty string or SQL NULL
+	//   - 1 for scalar values (JSON or non-JSON)
+	JSONArrayLengthExpr(column string) string
+}
+
 // SQLiteDialect represents the SQLite data database dialect.
 type SQLiteDialect struct{}
 
@@ -234,6 +254,11 @@ func (SQLiteDialect) JSONEachParamExpr(placeholder string) string {
 // SQLite's json_each() doesn't require an ON clause for LEFT JOINs.
 func (SQLiteDialect) JSONEachOnClause() dbx.Expression {
 	return nil
+}
+
+// JSONArrayLengthExpr implements the [jsonLengthDialect] interface.
+func (SQLiteDialect) JSONArrayLengthExpr(column string) string {
+	return dbutils.JSONArrayLength(column)
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -390,6 +415,20 @@ func (MySQLDialect) JSONEachParamExpr(placeholder string) string {
 // dummy "1=1" expression is returned.
 func (MySQLDialect) JSONEachOnClause() dbx.Expression {
 	return dbx.NewExp("1=1")
+}
+
+// JSONArrayLengthExpr implements the [jsonLengthDialect] interface.
+//
+// MySQL doesn't have json_array_length() or iif(), so JSON_LENGTH() and
+// IF() are used to mirror the SQLite normalization contract:
+//   - JSON array → array length
+//   - empty string or SQL NULL → 0
+//   - scalar values (JSON or non-JSON) → 1
+func (MySQLDialect) JSONArrayLengthExpr(column string) string {
+	return fmt.Sprintf(
+		`JSON_LENGTH(CASE WHEN IF(JSON_VALID([[%s]]), JSON_TYPE([[%s]]) = 'ARRAY', FALSE) THEN [[%s]] ELSE (CASE WHEN [[%s]] = '' OR [[%s]] IS NULL THEN JSON_ARRAY() ELSE JSON_ARRAY([[%s]]) END) END)`,
+		column, column, column, column, column, column,
+	)
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.

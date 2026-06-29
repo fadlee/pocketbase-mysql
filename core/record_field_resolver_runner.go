@@ -835,13 +835,28 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 	if modifier == lengthModifier && isMultivaluer {
 		jePair := r.activeTableAlias + "." + cleanFieldName
 
+		var lengthExpr string
+		if d := r.resolver.jsonLengthDialectIfAvailable(); d != nil {
+			lengthExpr = d.JSONArrayLengthExpr(jePair)
+		} else {
+			lengthExpr = dbutils.JSONArrayLength(jePair)
+		}
+
 		result := &search.ResolverResult{
-			Identifier: dbutils.JSONArrayLength(jePair),
+			Identifier: lengthExpr,
 		}
 
 		if r.withMultiMatch {
 			jePair2 := r.multiMatchActiveTableAlias + "." + cleanFieldName
-			r.multiMatch.ValueIdentifier = dbutils.JSONArrayLength(jePair2)
+
+			var lengthExpr2 string
+			if d := r.resolver.jsonLengthDialectIfAvailable(); d != nil {
+				lengthExpr2 = d.JSONArrayLengthExpr(jePair2)
+			} else {
+				lengthExpr2 = dbutils.JSONArrayLength(jePair2)
+			}
+
+			r.multiMatch.ValueIdentifier = lengthExpr2
 			result.MultiMatchSubQuery = r.multiMatch
 		}
 
