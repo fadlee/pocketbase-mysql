@@ -21,6 +21,7 @@ LICENSE.html
 
 # local runtime artifacts
 /.agents/
+/.worktrees/
 /pb_data/
 /pb-mysql.log
 /pb-server.log
