@@ -518,6 +518,16 @@ func (r *RecordFieldResolver) registerJoinExpr(tableExpr, tableAlias string, on 
 	return nil
 }
 
+// jsonEachDialectIfAvailable returns the jsonEachDialect capability if the
+// configured dialect implements it, or nil otherwise (e.g. in tests without
+// a real dialect).
+func (r *RecordFieldResolver) jsonEachDialectIfAvailable() jsonEachDialect {
+	if d, ok := r.app.Dialect().(jsonEachDialect); ok {
+		return d
+	}
+	return nil
+}
+
 func (r *RecordFieldResolver) registerRuleJoin(collection *Collection, tableAlias string) {
 	// replace existing
 	for i, j := range r.listRuleJoins {

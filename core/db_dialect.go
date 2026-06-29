@@ -5,6 +5,8 @@ import (
 	"os"
 	"strings"
 
+	"github.com/pocketbase/dbx"
+	"github.com/pocketbase/pocketbase/tools/dbutils"
 	"github.com/pocketbase/pocketbase/tools/search"
 )
 
@@ -82,6 +84,29 @@ type equalityDialect interface {
 // boolean is false, the caller should keep the default "id" column.
 type rowidDialect interface {
 	CountOverrideColumn(isView bool) (string, bool)
+}
+
+// jsonEachDialect is a local (unexported) capability interface that exposes
+// dialect-specific JSON table expression generation for array expansion.
+//
+// It is intentionally kept separate from the exported [Dialect] interface so
+// that the public surface stays minimal while the concrete dialect types can
+// still be type-asserted to provide JSON each expression generation.
+type jsonEachDialect interface {
+	// JSONEachColumnExpr returns a JSON table expression for a column reference.
+	// For SQLite: json_each(CASE WHEN ... END)
+	// For MySQL: JSON_TABLE(CASE WHEN ... END, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))
+	JSONEachColumnExpr(column string) string
+
+	// JSONEachParamExpr returns a JSON table expression for a parameter placeholder.
+	// For SQLite: json_each({:placeholder})
+	// For MySQL: JSON_TABLE({:placeholder}, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))
+	JSONEachParamExpr(placeholder string) string
+
+	// JSONEachOnClause returns the ON clause expression for JSON table joins.
+	// For SQLite: nil (json_each doesn't require ON)
+	// For MySQL: dbx.NewExp("1=1") (JSON_TABLE requires ON)
+	JSONEachOnClause() dbx.Expression
 }
 
 // SQLiteDialect represents the SQLite data database dialect.
@@ -192,6 +217,23 @@ func (SQLiteDialect) CountOverrideColumn(isView bool) (string, bool) {
 	}
 
 	return "_rowid_", true
+}
+
+// JSONEachColumnExpr implements the [jsonEachDialect] interface.
+func (SQLiteDialect) JSONEachColumnExpr(column string) string {
+	return dbutils.JSONEach(column)
+}
+
+// JSONEachParamExpr implements the [jsonEachDialect] interface.
+func (SQLiteDialect) JSONEachParamExpr(placeholder string) string {
+	return fmt.Sprintf("json_each({:%s})", placeholder)
+}
+
+// JSONEachOnClause implements the [jsonEachDialect] interface.
+//
+// SQLite's json_each() doesn't require an ON clause for LEFT JOINs.
+func (SQLiteDialect) JSONEachOnClause() dbx.Expression {
+	return nil
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -327,6 +369,27 @@ func (MySQLDialect) LikeColumnContainsExpr(column string) string {
 // and the default "id" column is used for both regular collections and views.
 func (MySQLDialect) CountOverrideColumn(isView bool) (string, bool) {
 	return "", false
+}
+
+// JSONEachColumnExpr implements the [jsonEachDialect] interface.
+func (MySQLDialect) JSONEachColumnExpr(column string) string {
+	return dbutils.JSONEach(column)
+}
+
+// JSONEachParamExpr implements the [jsonEachDialect] interface.
+func (MySQLDialect) JSONEachParamExpr(placeholder string) string {
+	return fmt.Sprintf(
+		`JSON_TABLE({:%s}, '$[*]' COLUMNS(value VARCHAR(255) PATH '$'))`,
+		placeholder,
+	)
+}
+
+// JSONEachOnClause implements the [jsonEachDialect] interface.
+//
+// MySQL's JSON_TABLE() requires an ON clause for LEFT JOINs, so a
+// dummy "1=1" expression is returned.
+func (MySQLDialect) JSONEachOnClause() dbx.Expression {
+	return dbx.NewExp("1=1")
 }
 
 // DialectForDriver returns the [Dialect] for the provided driver name.

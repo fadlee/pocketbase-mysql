@@ -356,10 +356,18 @@ func (r *runner) processRequestBodyEachModifier(bodyField Field) (*search.Resolv
 
 	placeholder := "dataEach" + security.PseudorandomString(8)
 	cleanFieldName := inflector.Columnify(bodyField.GetName())
-	jeTable := fmt.Sprintf("json_each({:%s})", placeholder)
+
+	var jeTable string
+	var onClause dbx.Expression
+	if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+		jeTable = d.JSONEachParamExpr(placeholder)
+		onClause = d.JSONEachOnClause()
+	} else {
+		jeTable = fmt.Sprintf("json_each({:%s})", placeholder)
+	}
 	jeAlias := "__dataEach_je_" + cleanFieldName + r.resolver.joinAliasSuffix
 
-	err = r.resolver.registerJoin(jeTable, jeAlias, nil)
+	err = r.resolver.registerJoinExpr(jeTable, jeAlias, onClause)
 	if err != nil {
 		return nil, err
 	}
@@ -375,12 +383,21 @@ func (r *runner) processRequestBodyEachModifier(bodyField Field) (*search.Resolv
 
 	if r.withMultiMatch {
 		placeholder2 := "mm" + placeholder
-		jeTable2 := fmt.Sprintf("json_each({:%s})", placeholder2)
+
+		var jeTable2 string
+		if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+			jeTable2 = d.JSONEachParamExpr(placeholder2)
+		} else {
+			jeTable2 = fmt.Sprintf("json_each({:%s})", placeholder2)
+		}
+
 		jeAlias2 := "__mm_" + jeAlias
 
 		r.multiMatch.Joins = append(r.multiMatch.Joins, &search.Join{
-			TableName:  jeTable2,
-			TableAlias: jeAlias2,
+			TableName:    jeTable2,
+			TableAlias:   jeAlias2,
+			On:           onClause,
+			RawTableExpr: true,
 		})
 		r.multiMatch.Params[placeholder2] = bodyItemsRaw
 		r.multiMatch.ValueIdentifier = fmt.Sprintf("[[%s.value]]", jeAlias2)
@@ -708,7 +725,11 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 			} else {
 				jeAlias := "__je_" + newTableAlias
 
-				err := r.resolver.registerJoin(dbutils.JSONEach(prefixedFieldName), jeAlias, nil)
+				var onClause dbx.Expression
+				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+					onClause = d.JSONEachOnClause()
+				}
+				err := r.resolver.registerJoinExpr(dbutils.JSONEach(prefixedFieldName), jeAlias, onClause)
 				if err != nil {
 					return nil, err
 				}
@@ -759,11 +780,17 @@ func (r *runner) processActiveProps() (*search.ResolverResult, error) {
 				)
 			} else {
 				jeAlias2 := r.multiMatchActiveTableAlias + "_" + cleanFieldName + "_je"
+				var mmOnClause dbx.Expression
+				if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+					mmOnClause = d.JSONEachOnClause()
+				}
 				r.multiMatch.Joins = append(
 					r.multiMatch.Joins,
 					&search.Join{
-						TableName:  dbutils.JSONEach(prefixedFieldName2),
-						TableAlias: jeAlias2,
+						TableName:    dbutils.JSONEach(prefixedFieldName2),
+						TableAlias:   jeAlias2,
+						On:           mmOnClause,
+						RawTableExpr: true,
 					},
 					&search.Join{
 						TableName:  inflector.Columnify(newCollectionName),
@@ -827,7 +854,11 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 		jePair := r.activeTableAlias + "." + cleanFieldName
 		jeAlias := "__je_" + r.activeTableAlias + "_" + cleanFieldName + r.resolver.joinAliasSuffix
 
-		err := r.resolver.registerJoin(dbutils.JSONEach(jePair), jeAlias, nil)
+		var onClause dbx.Expression
+		if d := r.resolver.jsonEachDialectIfAvailable(); d != nil {
+			onClause = d.JSONEachOnClause()
+		}
+		err := r.resolver.registerJoinExpr(dbutils.JSONEach(jePair), jeAlias, onClause)
 		if err != nil {
 			return nil, err
 		}
@@ -845,8 +876,10 @@ func (r *runner) finalizeActivePropsProcessing(collection *Collection, prop stri
 			jeAlias2 := "__je_" + r.multiMatchActiveTableAlias + "_" + cleanFieldName + r.resolver.joinAliasSuffix
 
 			r.multiMatch.Joins = append(r.multiMatch.Joins, &search.Join{
-				TableName:  dbutils.JSONEach(jePair2),
-				TableAlias: jeAlias2,
+				TableName:    dbutils.JSONEach(jePair2),
+				TableAlias:   jeAlias2,
+				On:           onClause,
+				RawTableExpr: true,
 			})
 			r.multiMatch.ValueIdentifier = fmt.Sprintf("[[%s.value]]", jeAlias2)
 
