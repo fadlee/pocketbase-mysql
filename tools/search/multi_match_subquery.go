@@ -10,20 +10,31 @@ import (
 var _ dbx.Expression = (*MultiMatchSubquery)(nil)
 
 // Join defines common fields required for a single SQL JOIN clause.
+//
+// When RawTableExpr is true, TableName is treated as a raw SQL table
+// expression (e.g. `json_each(...)` or `JSON_TABLE(...)`) and is written
+// verbatim without being passed through db.QuoteTableName. The TableAlias
+// is still quoted normally.
 type Join struct {
-	TableName  string
-	TableAlias string
-	On         dbx.Expression
+	TableName    string
+	TableAlias   string
+	On           dbx.Expression
+	RawTableExpr bool
 }
 
 // MultiMatchSubquery defines a multi-match record subquery expression.
+//
+// When ValueIdentifierRaw is true, ValueIdentifier is treated as a raw SQL
+// expression and is written verbatim without being passed through
+// db.QuoteColumnName.
 type MultiMatchSubquery struct {
-	TargetTableAlias string
-	FromTableName    string
-	FromTableAlias   string
-	ValueIdentifier  string
-	Joins            []*Join
-	Params           dbx.Params
+	TargetTableAlias   string
+	FromTableName      string
+	FromTableAlias     string
+	ValueIdentifier    string
+	ValueIdentifierRaw bool
+	Joins              []*Join
+	Params             dbx.Params
 }
 
 // Build converts the expression into a SQL fragment.
@@ -49,7 +60,13 @@ func (m *MultiMatchSubquery) Build(db *dbx.DB, params dbx.Params) string {
 			mergedJoins.WriteString(" ")
 		}
 		mergedJoins.WriteString("LEFT JOIN ")
-		mergedJoins.WriteString(db.QuoteTableName(j.TableName))
+		if j.RawTableExpr {
+			// raw table expression (e.g. json_each(...) or JSON_TABLE(...))
+			// should not be quoted
+			mergedJoins.WriteString(j.TableName)
+		} else {
+			mergedJoins.WriteString(db.QuoteTableName(j.TableName))
+		}
 		mergedJoins.WriteString(" ")
 		mergedJoins.WriteString(db.QuoteTableName(j.TableAlias))
 		if j.On != nil {
@@ -58,9 +75,14 @@ func (m *MultiMatchSubquery) Build(db *dbx.DB, params dbx.Params) string {
 		}
 	}
 
+	valueIdentifier := m.ValueIdentifier
+	if !m.ValueIdentifierRaw {
+		valueIdentifier = db.QuoteColumnName(m.ValueIdentifier)
+	}
+
 	return fmt.Sprintf(
 		`SELECT %s as [[multiMatchValue]] FROM %s %s %s WHERE %s = %s`,
-		db.QuoteColumnName(m.ValueIdentifier),
+		valueIdentifier,
 		db.QuoteTableName(m.FromTableName),
 		db.QuoteTableName(m.FromTableAlias),
 		mergedJoins.String(),

@@ -493,6 +493,31 @@ func (r *RecordFieldResolver) registerJoin(tableName string, tableAlias string, 
 	return nil
 }
 
+// registerJoinExpr registers a raw table expression join (e.g. `json_each(...)`
+// or `JSON_TABLE(...)`) without performing a collection/list-rule lookup.
+//
+// The tableExpr is stored verbatim and marked with RawTableExpr=true so that
+// MultiMatchSubquery.Build() skips quoting it.
+func (r *RecordFieldResolver) registerJoinExpr(tableExpr, tableAlias string, on dbx.Expression) error {
+	newJoin := &search.Join{
+		TableName:    tableExpr,
+		TableAlias:   tableAlias,
+		On:           on,
+		RawTableExpr: true,
+	}
+
+	// replace existing join with the same alias
+	for i, j := range r.joins {
+		if j.TableAlias == newJoin.TableAlias {
+			r.joins[i] = newJoin
+			return nil
+		}
+	}
+
+	r.joins = append(r.joins, newJoin)
+	return nil
+}
+
 func (r *RecordFieldResolver) registerRuleJoin(collection *Collection, tableAlias string) {
 	// replace existing
 	for i, j := range r.listRuleJoins {
