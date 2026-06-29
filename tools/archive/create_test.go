@@ -48,7 +48,11 @@ func TestCreateSuccess(t *testing.T) {
 		t.Fatalf("Expected zip with name %q, got %q", zipName, name)
 	}
 
+	// zip size depends on whether the symlink was created (platform-dependent)
 	expectedSize := int64(544)
+	if _, err := os.Lstat(filepath.Join(testDir, "test_symlink")); err != nil {
+		expectedSize = 405 // without symlink
+	}
 	if size := info.Size(); size != expectedSize {
 		t.Fatalf("Expected zip with size %d, got %d", expectedSize, size)
 	}
@@ -116,9 +120,9 @@ func createTestDir(t *testing.T) string {
 		f.Close()
 	}
 
-	// symbolic link
+	// symbolic link (skip on platforms without symlink privilege, e.g. Windows non-admin)
 	if err := os.Symlink(filepath.Join(dir, "test"), filepath.Join(dir, "test_symlink")); err != nil {
-		t.Fatal(err)
+		t.Logf("Skipping symlink creation: %v", err)
 	}
 
 	return dir

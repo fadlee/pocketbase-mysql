@@ -158,7 +158,7 @@ func TestOTPHasExpired(t *testing.T) {
 	now := types.NowDateTime()
 
 	otp := core.NewOTP(app)
-	otp.SetRaw("created", now.Add(-5*time.Minute))
+	otp.SetRaw("created", now.Add(-5*time.Minute-time.Millisecond))
 
 	scenarios := []struct {
 		maxElapsed time.Duration

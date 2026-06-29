@@ -106,9 +106,7 @@ func TestIntrospectionDialectMySQL(t *testing.T) {
 				AND LOWER(TABLE_NAME) = LOWER({:tableName})
 			LIMIT 1`, d.HasTableQuery())
 
-	require.Equal(t, `SELECT TABLE_NAME AS name, VIEW_DEFINITION AS sql
-			FROM information_schema.VIEWS
-			WHERE TABLE_SCHEMA = DATABASE()`, d.ViewsQuery())
+	require.Equal(t, "SELECT TABLE_NAME AS name, VIEW_DEFINITION AS `sql` FROM information_schema.VIEWS WHERE TABLE_SCHEMA = DATABASE()", d.ViewsQuery())
 
 	require.Equal(t, `SELECT TABLE_NAME
 			FROM information_schema.STATISTICS
