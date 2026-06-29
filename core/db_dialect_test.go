@@ -178,3 +178,26 @@ func TestJSONEachColumnExprMySQL(t *testing.T) {
 	result = core.MySQLDialect{}.JSONEachColumnExpr("a.b")
 	require.Equal(t, expected, result, "MySQLDialect must return MySQL expression regardless of env var")
 }
+
+func TestQueryViewDialectSQLite(t *testing.T) {
+	d := core.SQLiteDialect{}
+
+	require.Equal(t, "rowid ASC", d.DefaultCollectionSort())
+	require.False(t, d.RequiresSubqueryAlias())
+	require.Equal(t, "TEXT", d.IDCastType())
+	require.True(t, d.IsIDStringType("TEXT"))
+	require.True(t, d.IsIDStringType("text"))
+	require.False(t, d.IsIDStringType("INTEGER"))
+}
+
+func TestQueryViewDialectMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	require.Equal(t, "id ASC", d.DefaultCollectionSort())
+	require.True(t, d.RequiresSubqueryAlias())
+	require.Equal(t, "CHAR(255)", d.IDCastType())
+	require.True(t, d.IsIDStringType("varchar(255)"))
+	require.True(t, d.IsIDStringType("LONGTEXT"))
+	require.True(t, d.IsIDStringType("char(15)"))
+	require.False(t, d.IsIDStringType("INT"))
+}

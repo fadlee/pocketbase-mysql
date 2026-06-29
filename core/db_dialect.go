@@ -171,6 +171,51 @@ type strftimeDialect interface {
 	StrftimeExpr(args []search.TokenFunctionArg) (expr string, params dbx.Params, err error)
 }
 
+// queryViewDialect is a local (unexported) capability interface that
+// exposes dialect-specific query and view SQL generation behavior.
+//
+// It is intentionally kept separate from the exported [Dialect] interface
+// so that the public surface stays minimal while the concrete dialect types
+// can be type-asserted to provide query/view-specific behavior.
+type queryViewDialect interface {
+	// DefaultCollectionSort returns the ORDER BY expression used for
+	// default collection listing queries.
+	//
+	// For SQLite: "rowid ASC"
+	// For MySQL: "id ASC"
+	DefaultCollectionSort() string
+
+	// RequiresSubqueryAlias returns true if the dialect requires an alias
+	// for subqueries in FROM clauses.
+	//
+	// For SQLite: false (subqueries don't need aliases)
+	// For MySQL: true (subqueries require aliases)
+	RequiresSubqueryAlias() bool
+
+	// IDCastType returns the SQL type to cast ID columns to when
+	// normalizing view query IDs.
+	//
+	// For SQLite: "TEXT"
+	// For MySQL: "CHAR(255)"
+	IDCastType() string
+
+	// IsIDStringType returns true if the provided column type is already
+	// string-compatible and doesn't need casting for ID normalization.
+	//
+	// For SQLite: true only if colType is "TEXT"
+	// For MySQL: true if colType contains "CHAR" or "TEXT" (case-insensitive)
+	IsIDStringType(colType string) bool
+}
+
+// queryViewDialectIfAvailable returns the queryViewDialect capability if
+// the provided dialect implements it, or nil otherwise.
+func queryViewDialectIfAvailable(d Dialect) queryViewDialect {
+	if qd, ok := d.(queryViewDialect); ok {
+		return qd
+	}
+	return nil
+}
+
 // SQLiteDialect represents the SQLite data database dialect.
 type SQLiteDialect struct{}
 
@@ -327,6 +372,26 @@ func (SQLiteDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.P
 		identifiers = append(identifiers, arg.Result.Identifier)
 	}
 	return "strftime(" + strings.Join(identifiers, ",") + ")", nil, nil
+}
+
+// DefaultCollectionSort implements the [queryViewDialect] interface.
+func (SQLiteDialect) DefaultCollectionSort() string {
+	return "rowid ASC"
+}
+
+// RequiresSubqueryAlias implements the [queryViewDialect] interface.
+func (SQLiteDialect) RequiresSubqueryAlias() bool {
+	return false
+}
+
+// IDCastType implements the [queryViewDialect] interface.
+func (SQLiteDialect) IDCastType() string {
+	return "TEXT"
+}
+
+// IsIDStringType implements the [queryViewDialect] interface.
+func (SQLiteDialect) IsIDStringType(colType string) bool {
+	return strings.EqualFold(colType, "TEXT")
 }
 
 // MySQLDialect represents the MySQL data database dialect.
@@ -608,6 +673,27 @@ func (MySQLDialect) StrftimeExpr(args []search.TokenFunctionArg) (string, dbx.Pa
 
 	expr := fmt.Sprintf("DATE_FORMAT(%s, {:%s})", timeValueExpr, formatPlaceholder)
 	return expr, params, nil
+}
+
+// DefaultCollectionSort implements the [queryViewDialect] interface.
+func (MySQLDialect) DefaultCollectionSort() string {
+	return "id ASC"
+}
+
+// RequiresSubqueryAlias implements the [queryViewDialect] interface.
+func (MySQLDialect) RequiresSubqueryAlias() bool {
+	return true
+}
+
+// IDCastType implements the [queryViewDialect] interface.
+func (MySQLDialect) IDCastType() string {
+	return "CHAR(255)"
+}
+
+// IsIDStringType implements the [queryViewDialect] interface.
+func (MySQLDialect) IsIDStringType(colType string) bool {
+	rowType := strings.ToUpper(colType)
+	return strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT")
 }
 
 // translateStrftimeFormat converts SQLite strftime format tokens to MySQL

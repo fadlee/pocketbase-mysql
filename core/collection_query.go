@@ -39,8 +39,8 @@ func (app *BaseApp) FindAllCollections(collectionTypes ...string) ([]*Collection
 	}
 
 	orderBy := "rowid ASC"
-	if isMySQLDataDB(app) {
-		orderBy = "id ASC"
+	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
+		orderBy = d.DefaultCollectionSort()
 	}
 
 	err := q.OrderBy(orderBy).All(&collections)
@@ -315,15 +315,12 @@ func normalizeViewQueryId(app App, query string) (string, error) {
 
 	for _, row := range info {
 		if strings.EqualFold(row.Name, FieldNameId) {
-			if strings.EqualFold(row.Type, "TEXT") {
-				return query, nil // no wrapping needed
-			}
-
-			if isMySQLDataDB(app) {
-				rowType := strings.ToUpper(row.Type)
-				if strings.Contains(rowType, "CHAR") || strings.Contains(rowType, "TEXT") {
-					return query, nil // already string-compatible for MySQL ids
+			if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
+				if d.IsIDStringType(row.Type) {
+					return query, nil // no wrapping needed
 				}
+			} else if strings.EqualFold(row.Type, "TEXT") {
+				return query, nil // no wrapping needed (SQLite fallback)
 			}
 		}
 	}
@@ -338,17 +335,22 @@ func normalizeViewQueryId(app App, query string) (string, error) {
 	viewSourceAlias := "__pb_view_source"
 	for _, col := range rawParsed.columns {
 		if col.alias == FieldNameId {
-			if isMySQLDataDB(app) {
-				columns = append(columns, fmt.Sprintf("CAST([[%s]] as CHAR(255)) [[%s]]", col.alias, col.alias))
-			} else {
-				columns = append(columns, fmt.Sprintf("CAST([[%s]] as TEXT) [[%s]]", col.alias, col.alias))
+			castType := "TEXT"
+			if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
+				castType = d.IDCastType()
 			}
+			columns = append(columns, fmt.Sprintf("CAST([[%s]] as %s) [[%s]]", col.alias, castType, col.alias))
 		} else {
 			columns = append(columns, "[["+col.alias+"]]")
 		}
 	}
 
-	if isMySQLDataDB(app) {
+	requiresAlias := false
+	if d := queryViewDialectIfAvailable(app.Dialect()); d != nil {
+		requiresAlias = d.RequiresSubqueryAlias()
+	}
+
+	if requiresAlias {
 		query = fmt.Sprintf("SELECT %s FROM (%s) [[%s]]", strings.Join(columns, ","), query, viewSourceAlias)
 	} else {
 		query = fmt.Sprintf("SELECT %s FROM (%s)", strings.Join(columns, ","), query)
