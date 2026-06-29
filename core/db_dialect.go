@@ -703,8 +703,26 @@ func (MySQLDialect) Name() string {
 }
 
 // VarCharColumnType implements the [columnDialect] interface.
+//
+// MySQL has a maximum VARCHAR length of 65535 bytes, but the practical
+// limit is lower with multibyte character sets (e.g. ~16383 for utf8mb4).
+// When the requested max exceeds the VARCHAR limit, the type escalates
+// to TEXT (64KB), MEDIUMTEXT (16MB), or LONGTEXT (4GB) so that large
+// text fields (e.g. raw_source with max=500000) work without error.
+//
+// TEXT-family columns cannot have a DEFAULT value in MySQL, so the
+// application layer supplies the empty string zero value instead.
 func (MySQLDialect) VarCharColumnType(max int) string {
-	return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
+	switch {
+	case max <= 16383:
+		return fmt.Sprintf("VARCHAR(%d) DEFAULT '' NOT NULL", max)
+	case max <= 65535:
+		return "TEXT NOT NULL"
+	case max <= 16777215:
+		return "MEDIUMTEXT NOT NULL"
+	default:
+		return "LONGTEXT NOT NULL"
+	}
 }
 
 // PrimaryKeyColumnType implements the [columnDialect] interface.

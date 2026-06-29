@@ -1,6 +1,7 @@
 package core_test
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/pocketbase/dbx"
@@ -292,4 +293,33 @@ func TestRelationJoinDialectMySQL(t *testing.T) {
 	require.Equal(t, "BINARY a = BINARY b", d.RelationValueEqualsExpr("a", "b"))
 	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_CONTAINS")
 	require.Contains(t, d.RelationArrayContainsExpr("a", "b"), "JSON_QUOTE")
+}
+
+func TestVarCharColumnTypeMySQL(t *testing.T) {
+	d := core.MySQLDialect{}
+
+	scenarios := []struct {
+		max      int
+		expected string
+	}{
+		{0, "VARCHAR(0) DEFAULT '' NOT NULL"},
+		{15, "VARCHAR(15) DEFAULT '' NOT NULL"},
+		{255, "VARCHAR(255) DEFAULT '' NOT NULL"},
+		{16383, "VARCHAR(16383) DEFAULT '' NOT NULL"},
+		{16384, "TEXT NOT NULL"},
+		{50000, "TEXT NOT NULL"},
+		{65535, "TEXT NOT NULL"},
+		{65536, "MEDIUMTEXT NOT NULL"},
+		{500000, "MEDIUMTEXT NOT NULL"},
+		{16777215, "MEDIUMTEXT NOT NULL"},
+		{16777216, "LONGTEXT NOT NULL"},
+		{100000000, "LONGTEXT NOT NULL"},
+	}
+
+	for _, s := range scenarios {
+		t.Run(fmt.Sprintf("max_%d", s.max), func(t *testing.T) {
+			result := d.VarCharColumnType(s.max)
+			require.Equal(t, s.expected, result)
+		})
+	}
 }
